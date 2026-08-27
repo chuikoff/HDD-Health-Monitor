@@ -2278,9 +2278,12 @@ BOOL GetNVMeHealthLogPassthrough(HANDLE hDrive, DRIVE_INFO* pInfo)
 
 BOOL GetNVMeHealthLogEx(HANDLE hDrive, DRIVE_INFO* pInfo)
 {
+    /* Do not call GetNVMeHealthLogPassthrough here.
+     * IOCTL_STORAGE_PROTOCOL_COMMAND with a hand-built NVMe admin command
+     * can bugcheck Microsoft nvme.sys (DRIVER_IRQL_NOT_LESS_OR_EQUAL / 0xD1)
+     * during startup ScanDrives. See issue #1. */
     if (GetNVMeHealthLog(hDrive, pInfo)) return TRUE;
     if (GetNVMeHealthLogFallback(hDrive, pInfo)) return TRUE;
-    if (GetNVMeHealthLogPassthrough(hDrive, pInfo)) return TRUE;
     return FALSE;
 }
 
