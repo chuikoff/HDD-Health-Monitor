@@ -27,7 +27,6 @@ TARGET  = $(OUTDIR)/HDDHealthMonitor.exe
 SRCS    = $(SRCDIR)/main.cpp \
           $(SRCDIR)/mainwnd.cpp \
           $(SRCDIR)/smart.cpp \
-          $(SRCDIR)/smart_history.cpp \
           $(SRCDIR)/donate.cpp
 
 OBJS    = $(patsubst $(SRCDIR)/%.cpp, $(OBJDIR)/%.o, $(SRCS))
@@ -44,7 +43,7 @@ CFLAGS  = -mwindows -O2 \
           -I$(SRCDIR) \
           -Wall -Wno-unused-function -Wno-unused-parameter \
           -Wno-unused-variable -Wno-format -Wno-cast-function-type \
-          -fpermissive
+          -fpermissive -finput-charset=UTF-8
 
 # Linker flags:
 #   -static*           : Statically link the C/C++ runtime so the .exe

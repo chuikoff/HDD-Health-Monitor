@@ -262,8 +262,15 @@ typedef struct _NVME_IDENTIFY_CONTROLLER {
     BYTE    Reserved232[224];
     BYTE    Subnqn[256];
     BYTE    Reserved768[3072];
-    BYTE    VS[1024];         /* Vendor Specific */
+    BYTE    VS[256];          /* Vendor Specific (NVMe spec: 256 bytes at 3840) */
 } NVME_IDENTIFY_CONTROLLER;
+
+/* Identify Controller is 4096 bytes. VS[1024] made this struct ~4790 bytes
+ * so memcpy(sizeof) overread the 4096-byte SCSI DataBuf by ~768 bytes. */
+#ifdef __cplusplus
+static_assert(sizeof(NVME_IDENTIFY_CONTROLLER) <= 4096,
+    "NVME_IDENTIFY_CONTROLLER must fit in a 4096-byte Identify page");
+#endif
 
 /* ============================================================
  * Legacy ATA SMART structures
@@ -364,6 +371,7 @@ typedef struct _DRIVE_INFO {
     BOOL        bIsNVMe;
     int         nReadSpeedMBs;
     int         nWriteSpeedMBs;
+    char        szProtocol[32];  /* e.g. "NVMe 1.2.1", "SATA 6 Гбит/с", "USB" */
     SMART_ACCESS_METHOD eAccessMethod;
     DWORD       dwPowerOnHours;
     DWORD       dwPowerCycleCount;
@@ -535,9 +543,20 @@ int   CalculatePerformance(DRIVE_INFO* pInfo);
 /* SSD-specific analysis */
 void  ExtractSSDIndicators(DRIVE_INFO* pInfo);
 
-/* Aggregate scan */
+/* Aggregate scan.
+ * ScanDrivesEx: bMeasureSpeed is ignored (always treated as FALSE).
+ * MeasureReadSpeed/MeasureWriteSpeed are stubs that return -1 — 4MB
+ * PhysicalDrive probes crashed USB flash on refresh.
+ * ScanDrives() never measures speed. */
 int   ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives);
+int   ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed);
+/* Refresh attributes / NVMe health only. Does NOT re-read SMART error log
+ * or self-test log — those stay on the full ScanDrives path. */
 BOOL  RefreshDriveSmart(int nDriveIndex, DRIVE_INFO* pInfo);
+
+/* USB flash (UFD) heuristic: USB bus + flash-like product name, and not a
+ * known NVMe/SATA enclosure bridge. Used to skip SAT/vendor SMART retries. */
+BOOL  IsLikelyUsbFlashDrive(const DRIVE_INFO* pInfo);
 
 /* Utilities */
 void  FormatSize(DWORD dwMB, char* szBuf, int nBufLen);

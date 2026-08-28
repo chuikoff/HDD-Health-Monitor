@@ -43,7 +43,7 @@ const BYTE g_HistoryAttrIDs[HISTORY_TRACKED_ATTRS] = {
 };
 
 const char* const g_HistoryAttrShortNames[HISTORY_TRACKED_ATTRS] = {
-    "Temp (\xb0""C)",
+    "Temp (\xC2\xB0""C)",
     "Realloc'd Sect.",
     "Pending Sect.",
     "Uncorrect. Sect.",
@@ -111,6 +111,8 @@ void History_Record(DRIVE_INFO* pInfo, int nDriveCount)
         DRIVE_HISTORY* ph = &g_DriveHistory[slot];
 
         int idx = ph->nWriteHead;
+        if (idx < 0 || idx >= HISTORY_MAX_SAMPLES)
+            idx = 0;
         HISTORY_SAMPLE* ps = &ph->aSamples[idx];
         ZeroMemory(ps, sizeof(HISTORY_SAMPLE));
 
@@ -596,11 +598,11 @@ void Graph_ShowWindow(HWND hParent, HINSTANCE hInst, int nDriveIdx)
     if (!g_hGraphWnd) {
 
         g_hGraphFontSm = CreateFontA(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                     ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
                                      "Segoe UI");
         g_hGraphFontNm = CreateFontA(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                     ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
                                      "Segoe UI");
 

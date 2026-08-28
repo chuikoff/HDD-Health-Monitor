@@ -159,6 +159,289 @@ typedef struct _MY_STORAGE_PROTOCOL_QUERY {
 /* ============================================================
  * Utility helpers
  * ============================================================ */
+
+/* Safe NVMe admin data via IOCTL_STORAGE_QUERY_PROPERTY only.
+ * Never use IOCTL_STORAGE_PROTOCOL_COMMAND here: a hand-built NVMe
+ * command can bugcheck Microsoft nvme.sys (IRQL_NOT_LESS_OR_EQUAL).
+ * Tries device + adapter property and a few NSIDs; uses the offset
+ * the driver returned, not a hardcoded one. */
+static BOOL IsBufferAllZero(const BYTE* p, int nLen);
+static BOOL NvmeMiniportAdmin(HANDLE hDrive, DWORD cdw0, DWORD nsid, DWORD cdw10, BYTE* pOut, DWORD dwOut);
+static BOOL NVMeOverUSBTryAll(HANDLE hDrive, DRIVE_INFO* pInfo);
+static BOOL NvmeIntelRstAdmin(HANDLE hDrive, DWORD opcode, DWORD nsid, DWORD cdw10, BYTE* pOut, DWORD dwOut);
+static BOOL IsRealtekNvmeUsbBridge(const DRIVE_INFO* pInfo);
+static void CopyNvmeIdentBuf(DRIVE_INFO* pInfo, const BYTE* pBuf, DWORD nAvail);
+
+#pragma pack(push, 1)
+typedef struct _CDI_NVME_QUERY_BUF {
+    ULONG PropertyId;
+    ULONG QueryType;
+    MY_STORAGE_PROTOCOL_SPECIFIC_DATA ProtocolSpecific;
+    BYTE  Buffer[4096];
+} CDI_NVME_QUERY_BUF;
+#pragma pack(pop)
+
+static DWORD g_dwLastNvmeQueryErr;
+
+/* NVMe Identify Controller byte offset 80 is VER (spec):
+ * bits 31:16 major, 15:8 minor, 7:0 tertiary. Named fields of
+ * NVME_IDENTIFY_CONTROLLER are misaligned — read the raw copy. */
+static void FillNvmeProtocolFromIdent(DRIVE_INFO* pInfo)
+{
+    const BYTE* id;
+    DWORD ver;
+    unsigned maj, minr, ter;
+    if (!pInfo) return;
+    id = (const BYTE*)&pInfo->nvmeIdent;
+    ver = (DWORD)id[80] | ((DWORD)id[81] << 8) |
+          ((DWORD)id[82] << 16) | ((DWORD)id[83] << 24);
+    if (ver == 0) {
+        _snprintf(pInfo->szProtocol, 32, "NVMe");
+        return;
+    }
+    maj  = (ver >> 16) & 0xFFFF;
+    minr = (ver >> 8) & 0xFF;
+    ter  = ver & 0xFF;
+    _snprintf(pInfo->szProtocol, 32, "NVMe %u.%u.%u", maj, minr, ter);
+}
+
+static void FillAtaProtocolFromIdent(DRIVE_INFO* pInfo, const WORD* pIdent)
+{
+    WORD w76, w77;
+    unsigned neg;
+    if (!pInfo || !pIdent) return;
+    w76 = pIdent[76];
+    w77 = pIdent[77];
+    /* Word 77 bits 3:1 = negotiated SATA speed (1=Gen1, 2=Gen2, 3=Gen3). */
+    neg = (unsigned)((w77 >> 1) & 0x7);
+    if (neg == 3)
+        _snprintf(pInfo->szProtocol, 32, "SATA 6 Гбит/с");
+    else if (neg == 2)
+        _snprintf(pInfo->szProtocol, 32, "SATA 3 Гбит/с");
+    else if (neg == 1)
+        _snprintf(pInfo->szProtocol, 32, "SATA 1.5 Гбит/с");
+    else if (w76 != 0 && w76 != 0xFFFF) {
+        /* Word 76: bit1=1.5, bit2=3.0, bit3=6.0 Gb/s supported. */
+        if (w76 & 0x0008)
+            _snprintf(pInfo->szProtocol, 32, "SATA 6 Гбит/с");
+        else if (w76 & 0x0004)
+            _snprintf(pInfo->szProtocol, 32, "SATA 3 Гбит/с");
+        else if (w76 & 0x0002)
+            _snprintf(pInfo->szProtocol, 32, "SATA 1.5 Гбит/с");
+        else
+            _snprintf(pInfo->szProtocol, 32, "SATA");
+    } else {
+        _snprintf(pInfo->szProtocol, 32, "ATA");
+    }
+}
+
+/* Final protocol string after type / SMART / NVMe ident are known. */
+static void FillDriveProtocol(DRIVE_INFO* pInfo)
+{
+    char hay[384];
+    if (!pInfo) return;
+
+    if (pInfo->bIsNVMe) {
+        if (pInfo->bGotNVMeIdent) {
+            FillNvmeProtocolFromIdent(pInfo);
+        } else if (pInfo->szProtocol[0] == '\0') {
+            _snprintf(pInfo->szProtocol, 32, "NVMe");
+        }
+        return;
+    }
+
+    if (pInfo->bIsUSB && !pInfo->bSMART_Supported) {
+        _snprintf(hay, sizeof(hay), "%s %s %s",
+                  pInfo->szModel, pInfo->szBridgeVendor, pInfo->szBridgeProduct);
+        if (IsRealtekNvmeUsbBridge(pInfo) ||
+            pInfo->eUsbBridgeType == USB_BRIDGE_NVME_REALTEK ||
+            strstr(hay, "RTL9210") || strstr(hay, "RTL921"))
+            _snprintf(pInfo->szProtocol, 32, "USB (RTL9210)");
+        else
+            _snprintf(pInfo->szProtocol, 32, "USB");
+        return;
+    }
+
+    if (pInfo->szProtocol[0] &&
+        (strncmp(pInfo->szProtocol, "SATA", 4) == 0 ||
+         strcmp(pInfo->szProtocol, "ATA") == 0))
+        return;
+
+    if (pInfo->eType == DRIVE_TYPE_HDD ||
+        pInfo->eType == DRIVE_TYPE_SSD_SATA ||
+        pInfo->eType == DRIVE_TYPE_M2_SATA)
+        _snprintf(pInfo->szProtocol, 32, "SATA");
+    else if (pInfo->eType == DRIVE_TYPE_EMMC)
+        _snprintf(pInfo->szProtocol, 32, "eMMC");
+    else if (pInfo->eType == DRIVE_TYPE_SD)
+        _snprintf(pInfo->szProtocol, 32, "SD");
+    else if (pInfo->eType == DRIVE_TYPE_SCSI)
+        _snprintf(pInfo->szProtocol, 32, "SCSI");
+    else if (pInfo->bIsUSB)
+        _snprintf(pInfo->szProtocol, 32, "USB");
+    else if (pInfo->szProtocol[0] == '\0')
+        _snprintf(pInfo->szProtocol, 32, "ATA");
+}
+
+/* memcpy Identify Controller without overreading a 4096-byte page. */
+static void CopyNvmeIdentBuf(DRIVE_INFO* pInfo, const BYTE* pBuf, DWORD nAvail)
+{
+    DWORD n;
+    if (!pInfo || !pBuf || nAvail == 0) return;
+    n = (DWORD)sizeof(NVME_IDENTIFY_CONTROLLER);
+    if (n > nAvail) n = nAvail;
+    if (n > 4096) n = 4096;
+    memcpy(&pInfo->nvmeIdent, pBuf, n);
+    if (n >= 84)
+        FillNvmeProtocolFromIdent(pInfo);
+    else
+        _snprintf(pInfo->szProtocol, 32, "NVMe");
+}
+
+/* Realtek RTL9210 USB dual-mode enclosure (NVMe via 0xE4, SATA via SAT).
+ * Native NvmeMini IOCTL on this USB handle crashes the process.
+ * ScanDrivesEx: SAT SMART first, then one-shot vendor 0xE4.
+ * Never 0xE4 / NvmeMini from RefreshDriveSmart or NVMeOverUSBTryAll. */
+static BOOL IsRealtekNvmeUsbBridge(const DRIVE_INFO* p)
+{
+    char hay[384];
+    int i;
+    if (!p) return FALSE;
+    if (p->eUsbBridgeType == USB_BRIDGE_NVME_REALTEK)
+        return TRUE;
+    if (p->wUsbVid == 0x0BDA &&
+        (p->wUsbPid == 0x9210 || p->wUsbPid == 0x9211 ||
+         p->wUsbPid == 0x9220 || p->wUsbPid == 0x9221))
+        return TRUE;
+    _snprintf(hay, sizeof(hay), "%s %s %s",
+              p->szModel, p->szBridgeVendor, p->szBridgeProduct);
+    for (i = 0; hay[i]; i++)
+        hay[i] = (char)toupper((unsigned char)hay[i]);
+    if (strstr(hay, "RTL9210") || strstr(hay, "RTL9211") ||
+        strstr(hay, "RTL921"))
+        return TRUE;
+    if (strstr(hay, "REALTEK") && strstr(hay, "9210"))
+        return TRUE;
+    return FALSE;
+}
+
+static BOOL QueryNVMeProtocolOnHandle(HANDLE h, ULONG dataType, ULONG requestValue,
+                                      BYTE* pOut, DWORD dwOutLen, DWORD* pdwCopied)
+{
+    const ULONG propertyIds[2] = {
+        (ULONG)StorageAdapterProtocolSpecificProperty,
+        (ULONG)StorageDeviceProtocolSpecificProperty
+    };
+    ULONG subValues[3];
+    ULONG lengths[2];
+    int nSub, nLen, ip, isv, il;
+
+    if (dataType == MY_NVMeDataTypeLogPage) {
+        subValues[0] = 0;
+        subValues[1] = 0xFFFFFFFFu;
+        subValues[2] = 1;
+        nSub = 3;
+        lengths[0] = 512;
+        lengths[1] = 4096;
+        nLen = 2;
+    } else {
+        subValues[0] = 0;
+        subValues[1] = 1;
+        nSub = 2;
+        lengths[0] = 4096;
+        nLen = 1;
+    }
+
+    for (ip = 0; ip < 2; ip++) {
+        for (isv = 0; isv < nSub; isv++) {
+            for (il = 0; il < nLen; il++) {
+                CDI_NVME_QUERY_BUF* q = (CDI_NVME_QUERY_BUF*)HeapAlloc(
+                    GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(CDI_NVME_QUERY_BUF));
+                DWORD dwBytes = 0;
+                BYTE* pData;
+                DWORD avail;
+                ULONG off;
+
+                if (!q) return FALSE;
+
+                q->PropertyId = propertyIds[ip];
+                q->QueryType  = 0;
+                q->ProtocolSpecific.ProtocolType             = MY_ProtocolTypeNvme;
+                q->ProtocolSpecific.DataType                 = dataType;
+                q->ProtocolSpecific.ProtocolDataRequestValue = requestValue;
+                q->ProtocolSpecific.ProtocolDataRequestSubValue = subValues[isv];
+                q->ProtocolSpecific.ProtocolDataOffset       = sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA);
+                q->ProtocolSpecific.ProtocolDataLength       = lengths[il];
+
+                if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY,
+                        q, sizeof(*q), q, sizeof(*q), &dwBytes, NULL)) {
+                    g_dwLastNvmeQueryErr = GetLastError();
+                    HeapFree(GetProcessHeap(), 0, q);
+                    continue;
+                }
+
+                off = q->ProtocolSpecific.ProtocolDataOffset;
+                if (off == 0) off = sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA);
+                pData = (BYTE*)&q->ProtocolSpecific + off;
+                if (pData < (BYTE*)q || pData >= (BYTE*)q + sizeof(*q))
+                    pData = q->Buffer;
+                avail = (DWORD)(((BYTE*)q + sizeof(*q)) - pData);
+                if (avail > dwOutLen) avail = dwOutLen;
+
+                if (avail >= 8 && !IsBufferAllZero(pData, avail > 16 ? 16 : (int)avail)) {
+                    memcpy(pOut, pData, avail);
+                    if (pdwCopied) *pdwCopied = avail;
+                    HeapFree(GetProcessHeap(), 0, q);
+                    return TRUE;
+                }
+                if (!IsBufferAllZero(q->Buffer, 16)) {
+                    avail = dwOutLen < 4096 ? dwOutLen : 4096;
+                    memcpy(pOut, q->Buffer, avail);
+                    if (pdwCopied) *pdwCopied = avail;
+                    HeapFree(GetProcessHeap(), 0, q);
+                    return TRUE;
+                }
+                HeapFree(GetProcessHeap(), 0, q);
+            }
+        }
+    }
+    return FALSE;
+}
+
+static BOOL QueryNVMeProtocol(HANDLE hDrive, ULONG dataType, ULONG requestValue,
+                              BYTE* pOut, DWORD dwOutLen, DWORD* pdwCopied)
+{
+    SCSI_ADDRESS addr;
+    DWORD dwBytes = 0;
+    HANDLE hScsi;
+    char szScsi[32];
+
+    g_dwLastNvmeQueryErr = 0;
+    if (QueryNVMeProtocolOnHandle(hDrive, dataType, requestValue, pOut, dwOutLen, pdwCopied))
+        return TRUE;
+
+    ZeroMemory(&addr, sizeof(addr));
+    addr.Length = sizeof(addr);
+    if (DeviceIoControl(hDrive, IOCTL_SCSI_GET_ADDRESS,
+            NULL, 0, &addr, sizeof(addr), &dwBytes, NULL)) {
+        _snprintf(szScsi, sizeof(szScsi), "\\\\.\\Scsi%d:", (int)addr.PortNumber);
+        hScsi = CreateFileA(szScsi, GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hScsi != INVALID_HANDLE_VALUE) {
+            BOOL ok = QueryNVMeProtocolOnHandle(hScsi, dataType, requestValue,
+                                                pOut, dwOutLen, pdwCopied);
+            CloseHandle(hScsi);
+            if (ok) return TRUE;
+        } else if (g_dwLastNvmeQueryErr == 0) {
+            g_dwLastNvmeQueryErr = GetLastError();
+        }
+    } else if (g_dwLastNvmeQueryErr == 0) {
+        g_dwLastNvmeQueryErr = GetLastError();
+    }
+    return FALSE;
+}
+
 static void TrimStr(char* sz)
 {
     if (!sz || !sz[0]) return;
@@ -258,152 +541,152 @@ static BOOL IsBufferAllFF(const BYTE* p, int nLen)
  * ============================================================ */
 const ATTR_NAME g_AttrNames[] = {
     /* ---- Standard ATA SMART attributes ---- */
-    { 0x01, "Raw Read Error Rate",              ATTR_CRIT_ADVISORY,  INTERP_RATE         },
-    { 0x02, "Throughput Performance",            ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0x03, "Spin-Up Time",                      ATTR_CRIT_NONE,      INTERP_DURATION     },
-    { 0x04, "Start/Stop Count",                  ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0x05, "Reallocated Sectors Count",         ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0x06, "Read Channel Margin",               ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0x07, "Seek Error Rate",                   ATTR_CRIT_ADVISORY,  INTERP_RATE         },
-    { 0x08, "Seek Time Performance",             ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0x09, "Power-On Hours",                    ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0x0A, "Spin Retry Count",                  ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0x0B, "Calibration Retry Count",           ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0x0C, "Power Cycle Count",                 ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0x0D, "Soft Read Error Rate",              ATTR_CRIT_ADVISORY,  INTERP_RATE         },
-    { 0x0E, "G-Sense Error Rate (Alt)",          ATTR_CRIT_NONE,      INTERP_RATE         },
-    { 0x0F, "Load/Unload Retry Count",           ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0x10, "Head Flying Hours",                 ATTR_CRIT_NONE,      INTERP_COUNTER48    },
-    { 0x11, "Calibration Retry Count (Alt)",     ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0x01, "Частота ошибок чтения",             ATTR_CRIT_ADVISORY,  INTERP_RATE         },
+    { 0x02, "Производительность",                ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0x03, "Время раскрутки",                   ATTR_CRIT_NONE,      INTERP_DURATION     },
+    { 0x04, "Циклы старт/стоп",                  ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0x05, "Переназначенные сектора",           ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0x06, "Запас канала чтения",               ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0x07, "Частота ошибок позиционирования",   ATTR_CRIT_ADVISORY,  INTERP_RATE         },
+    { 0x08, "Скорость позиционирования",         ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0x09, "Часы наработки",                    ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0x0A, "Повторы раскрутки",                 ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0x0B, "Повторы калибровки",                ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0x0C, "Циклы включения",                   ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0x0D, "Частота программных ошибок чтения", ATTR_CRIT_ADVISORY,  INTERP_RATE         },
+    { 0x0E, "Частота ошибок G-сенсора",          ATTR_CRIT_NONE,      INTERP_RATE         },
+    { 0x0F, "Повторы парковки",                  ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0x10, "Часы полёта головок",               ATTR_CRIT_NONE,      INTERP_COUNTER48    },
+    { 0x11, "Повторы калибровки (альт.)",        ATTR_CRIT_NONE,      INTERP_COUNTER32    },
 
     /* ---- SATA/ATA additional standard ---- */
-    { 0x16, "Current Helium Level",              ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
-    { 0x17, "Helium Condition Lower",            ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0x18, "Helium Condition Upper",            ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0x19, "Helium Condition Count",            ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0x1A, "Remaining Rated Life",              ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
-    { 0x1B, "Endurance Remaining",               ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
-    { 0x1C, "Available Reserved Space",          ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
+    { 0x16, "Уровень гелия",                     ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
+    { 0x17, "Гелий (нижний порог)",              ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0x18, "Гелий (верхний порог)",             ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0x19, "Счётчик состояния гелия",           ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0x1A, "Остаток ресурса",                   ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
+    { 0x1B, "Остаток выносливости",              ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
+    { 0x1C, "Резервное пространство",            ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
 
     /* ---- SSD vendor-specific attributes (multiple vendors) ---- */
-    { 0xA0, "Unsafe Shutdown Count",             ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xA1, "Used Reserved Block Count Total",   ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
-    { 0xA2, "Used Reserved Block Count Worst",   ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
-    { 0xA3, "Initial Bad Block Count",           ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xA4, "Total Erase Count",                 ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xA5, "Max Erase Count",                   ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xA6, "Min Erase Count",                   ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xA7, "Average Erase Count",               ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xA8, "Max Erase Count of Spec",           ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xA9, "Remaining Life Percentage",         ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
-    { 0xAA, "Available Reserved Space",          ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
-    { 0xAB, "Program Fail Count",                ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xAC, "Erase Fail Count",                  ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xAD, "Wear Leveling Count",               ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xAE, "Unexpected Power Loss",             ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xAF, "Power Loss Protection Fail",        ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xB0, "Erase Fail Count (Chip)",           ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xB1, "Wear Range Delta",                  ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xB2, "Used Reserved Block Count",         ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
-    { 0xB3, "Used Reserved Block Count Total (Alt)", ATTR_CRIT_ADVISORY, INTERP_COUNTER32 },
-    { 0xB4, "Unused Reserved Block Count Total", ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xB5, "Program Fail Count Total",          ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xB6, "Erase Fail Count Total",            ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xB7, "SATA Downshift Error Count",        ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
-    { 0xB8, "End-to-End Error",                  ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xB9, "Head Stability",                    ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xBA, "Induced Op-Vibration Detection",    ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xBB, "Uncorrectable ECC Error",           ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xBC, "Command Timeout",                   ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
-    { 0xBD, "High Fly Writes",                   ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xBE, "Airflow Temperature",               ATTR_CRIT_NONE,      INTERP_TEMPERATURE  },
-    { 0xBF, "G-Sense Error Rate",                ATTR_CRIT_NONE,      INTERP_RATE         },
-    { 0xC0, "Power-Off Retract Count",           ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xC1, "Load/Unload Cycle Count",           ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xC2, "Temperature",                       ATTR_CRIT_NONE,      INTERP_TEMPERATURE  },
-    { 0xC3, "Hardware ECC Recovered",            ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xC4, "Reallocation Event Count",          ATTR_CRIT_CRITICAL,  INTERP_EVENT_COUNT  },
-    { 0xC5, "Current Pending Sectors",           ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xC6, "Uncorrectable Sectors",             ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xC7, "UltraDMA CRC Error Count",          ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
-    { 0xC8, "Write Error Rate",                  ATTR_CRIT_CRITICAL,  INTERP_RATE         },
-    { 0xC9, "Soft Read Error Rate (Alt)",        ATTR_CRIT_NONE,      INTERP_RATE         },
-    { 0xCA, "Data Address Mark Errors",          ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
-    { 0xCB, "Run Out Cancel",                    ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xCC, "Soft ECC Correction",               ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xCD, "Thermal Asperity Rate",             ATTR_CRIT_NONE,      INTERP_RATE         },
-    { 0xCE, "Flying Height",                     ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xCF, "Spin High Current",                 ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xD0, "Spin Buzz",                         ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xD1, "Offline Seek Performance",          ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xD2, "Vibration During Write",            ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xD3, "Vibration During Write (Alt)",      ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xD4, "Shock During Write",                ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xD5, "Free Fall Protection",              ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xD6, "Free Fall Event Count",             ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xDC, "Disk Shift",                        ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xDD, "G-Sense Error Rate Alt",            ATTR_CRIT_NONE,      INTERP_RATE         },
-    { 0xDE, "Loaded Hours",                      ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xDF, "Load/Unload Retry Count",           ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xE0, "Load Friction",                     ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xE1, "Load/Unload Cycle Count (Alt)",     ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xE2, "Load In-Time",                      ATTR_CRIT_NONE,      INTERP_DURATION     },
-    { 0xE3, "Torque Amplification Count",        ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xE4, "Power-Off Retract Cycle",           ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xE5, "GMR Head Amplitude",                ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xE6, "GMR Head Amplitude (Alt)",          ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xE7, "SSD Life Left / Temperature",       ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
-    { 0xE8, "Available Reserved Space",          ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
-    { 0xE9, "NAND Writes (GB) / Media Wearout",  ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xEA, "Average Erase Count / Total Writes",ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xEB, "Good Block Count / NAND Endurance", ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xEC, "Write Error Count",                 ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
-    { 0xED, "Cyclic Redundancy Check Count",     ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
-    { 0xEE, "PMR Head Stability",                ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xEF, "SATA PHY Error Count",              ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
+    { 0xA0, "Внезапные выключения",              ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xA1, "Использовано резервных блоков",     ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
+    { 0xA2, "Худший резервный блок",             ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
+    { 0xA3, "Начальные плохие блоки",            ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xA4, "Всего стираний",                    ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xA5, "Макс. стираний",                    ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xA6, "Мин. стираний",                     ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xA7, "Среднее стираний",                  ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xA8, "Макс. стираний по спецификации",    ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xA9, "Остаток ресурса %",                 ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
+    { 0xAA, "Резервное пространство",            ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
+    { 0xAB, "Ошибки программирования",           ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xAC, "Ошибки стирания",                   ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xAD, "Выравнивание износа",               ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xAE, "Внезапная потеря питания",          ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xAF, "Сбой защиты питания",               ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xB0, "Ошибки стирания (чип)",             ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xB1, "Разброс износа",                    ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xB2, "Использовано резервных блоков",     ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
+    { 0xB3, "Использовано резервных блоков (всего)", ATTR_CRIT_ADVISORY, INTERP_COUNTER32 },
+    { 0xB4, "Свободные резервные блоки",         ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xB5, "Ошибки программирования (всего)",   ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xB6, "Ошибки стирания (всего)",           ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xB7, "Ошибки понижения SATA",             ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
+    { 0xB8, "Ошибка End-to-End",                 ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xB9, "Стабильность головок",              ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xBA, "Детектор вибрации",                 ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xBB, "Неисправимые ошибки ECC",           ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xBC, "Таймауты команд",                   ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
+    { 0xBD, "Записи на большой высоте",          ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xBE, "Температура воздуха",               ATTR_CRIT_NONE,      INTERP_TEMPERATURE  },
+    { 0xBF, "Частота ошибок G-сенсора",          ATTR_CRIT_NONE,      INTERP_RATE         },
+    { 0xC0, "Парковки при выключении",           ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xC1, "Циклы парковки",                    ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xC2, "Температура",                       ATTR_CRIT_NONE,      INTERP_TEMPERATURE  },
+    { 0xC3, "Восстановлено ECC",                 ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xC4, "События переназначения",            ATTR_CRIT_CRITICAL,  INTERP_EVENT_COUNT  },
+    { 0xC5, "Нестабильные сектора",              ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xC6, "Неисправимые сектора",              ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xC7, "Ошибки CRC UltraDMA",               ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
+    { 0xC8, "Частота ошибок записи",             ATTR_CRIT_CRITICAL,  INTERP_RATE         },
+    { 0xC9, "Частота программных ошибок чтения", ATTR_CRIT_NONE,      INTERP_RATE         },
+    { 0xCA, "Ошибки DAM",                        ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
+    { 0xCB, "Отмена Run-Out",                    ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xCC, "Программная коррекция ECC",         ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xCD, "Тепловые выбросы",                  ATTR_CRIT_NONE,      INTERP_RATE         },
+    { 0xCE, "Высота полёта",                     ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xCF, "Ток раскрутки",                     ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xD0, "Жужжание шпинделя",                 ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xD1, "Offline-позиционирование",          ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xD2, "Вибрация при записи",               ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xD3, "Вибрация при записи (альт.)",       ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xD4, "Удар при записи",                   ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xD5, "Защита от падения",                 ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xD6, "События свободного падения",        ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xDC, "Смещение диска",                    ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xDD, "Частота ошибок G-сенсора (альт.)",  ATTR_CRIT_NONE,      INTERP_RATE         },
+    { 0xDE, "Часы под нагрузкой",                ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xDF, "Повторы парковки",                  ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xE0, "Трение парковки",                   ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xE1, "Циклы парковки (альт.)",            ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xE2, "Время парковки",                    ATTR_CRIT_NONE,      INTERP_DURATION     },
+    { 0xE3, "Усиление крутящего момента",        ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xE4, "Циклы парковки при выключении",     ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xE5, "Амплитуда GMR",                     ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xE6, "Амплитуда GMR (альт.)",             ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xE7, "Остаток ресурса SSD / температура", ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
+    { 0xE8, "Резервное пространство",            ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
+    { 0xE9, "Записи NAND (ГБ) / износ",          ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xEA, "Среднее стираний / записи",         ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xEB, "Хорошие блоки / ресурс NAND",       ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xEC, "Ошибки записи",                     ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
+    { 0xED, "Ошибки CRC",                        ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
+    { 0xEE, "Стабильность PMR",                  ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xEF, "Ошибки SATA PHY",                   ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
 
     /* ---- Samsung-specific ---- */
-    { 0xF0, "Head Flying Hours (Alt)",           ATTR_CRIT_NONE,      INTERP_COUNTER48    },
-    { 0xF1, "Total LBAs Written",                ATTR_CRIT_NONE,      INTERP_COUNTER48    },
-    { 0xF2, "Total LBAs Read",                   ATTR_CRIT_NONE,      INTERP_COUNTER48    },
-    { 0xF3, "Total LBAs Written Expanded",       ATTR_CRIT_NONE,      INTERP_COUNTER48    },
-    { 0xF4, "Total LBAs Read Expanded",          ATTR_CRIT_NONE,      INTERP_COUNTER48    },
-    { 0xF5, "Min Erase Count (Samsung)",         ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xF6, "Max Erase Count (Samsung)",         ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xF7, "Average Erase Count (Samsung)",     ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xF8, "Wear Leveling Count (Samsung)",     ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xF9, "NAND Writes (GiB)",                 ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xFA, "Read Error Retry Rate",             ATTR_CRIT_ADVISORY,  INTERP_RATE         },
-    { 0xFB, "Minimum Spares Remaining",          ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
-    { 0xFC, "Newly Added Bad Flash Block",        ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xFD, "Inter-Surface Defect Count",        ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xFE, "Free Fall Protection",              ATTR_CRIT_NONE,      INTERP_NORMAL       },
-    { 0xFF, "Vendor-Specific",                   ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xF0, "Часы полёта головок (альт.)",       ATTR_CRIT_NONE,      INTERP_COUNTER48    },
+    { 0xF1, "Записано LBA",                      ATTR_CRIT_NONE,      INTERP_COUNTER48    },
+    { 0xF2, "Прочитано LBA",                     ATTR_CRIT_NONE,      INTERP_COUNTER48    },
+    { 0xF3, "Записано LBA (расш.)",              ATTR_CRIT_NONE,      INTERP_COUNTER48    },
+    { 0xF4, "Прочитано LBA (расш.)",             ATTR_CRIT_NONE,      INTERP_COUNTER48    },
+    { 0xF5, "Мин. стираний (Samsung)",           ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xF6, "Макс. стираний (Samsung)",          ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xF7, "Среднее стираний (Samsung)",        ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xF8, "Выравнивание износа (Samsung)",     ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xF9, "Записи NAND (ГиБ)",                 ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xFA, "Повторы ошибок чтения",             ATTR_CRIT_ADVISORY,  INTERP_RATE         },
+    { 0xFB, "Остаток запасных блоков",           ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
+    { 0xFC, "Новые плохие блоки NAND",           ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xFD, "Межповерхностные дефекты",          ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xFE, "Защита от падения",                 ATTR_CRIT_NONE,      INTERP_NORMAL       },
+    { 0xFF, "Атрибут производителя",             ATTR_CRIT_NONE,      INTERP_NORMAL       },
 
     /* ---- Intel SSD specific ---- */
-    { 0xB8, "End-to-End Error Detection",        ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xB8, "Обнаружение ошибок End-to-End",     ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
 
     /* ---- Micron/Crucial SSD specific ---- */
-    { 0xBB, "Uncorrectable Error Count",         ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xBB, "Неисправимые ошибки",               ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
 
     /* ---- Additional vendor-specific SSD attributes ---- */
-    { 0xA0, "Temperature (Vendor)",              ATTR_CRIT_NONE,      INTERP_TEMPERATURE  },
-    { 0xA9, "SSD Life Left (Vendor)",            ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
+    { 0xA0, "Температура (производитель)",       ATTR_CRIT_NONE,      INTERP_TEMPERATURE  },
+    { 0xA9, "Остаток ресурса SSD",               ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
 
     /* ---- Kingston SSD specific ---- */
-    { 0xB6, "Erase Fail Count (Kingston)",       ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
+    { 0xB6, "Ошибки стирания (Kingston)",        ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
 
     /* ---- WDC/HGST specific ---- */
-    { 0x18, "Current Helium Level (WDC)",        ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
+    { 0x18, "Уровень гелия (WDC)",               ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
 
     /* ---- Seagate specific ---- */
-    { 0x02, "Start/Stop Count (Seagate)",        ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0x02, "Циклы старт/стоп (Seagate)",        ATTR_CRIT_NONE,      INTERP_COUNTER32    },
 
     /* ---- SK Hynix specific ---- */
-    { 0xB4, "SATA Phy Error Count (SK Hynix)",   ATTR_CRIT_ADVISORY,  INTERP_COUNTER32   },
+    { 0xB4, "Ошибки SATA PHY (SK Hynix)",        ATTR_CRIT_ADVISORY,  INTERP_COUNTER32   },
 
     /* ---- ADATA specific ---- */
-    { 0xAD, "Average Erase Count (ADATA)",       ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xAD, "Среднее стираний (ADATA)",          ATTR_CRIT_NONE,      INTERP_COUNTER32    },
 
     /* Terminator */
     { 0x00, NULL,                                ATTR_CRIT_NONE,      INTERP_NORMAL       }
@@ -416,7 +699,7 @@ const char* GetAttrName(BYTE bID)
         if (g_AttrNames[i].bID == bID) return g_AttrNames[i].szName;
         i++;
     }
-    return "Unknown Attribute";
+    return "Неизвестный атрибут";
 }
 
 ATTR_CRITICALITY GetAttrCriticality(BYTE bID)
@@ -448,14 +731,14 @@ const char* GetDriveTypeName(DRIVE_TYPE eType)
 {
     switch (eType) {
     case DRIVE_TYPE_HDD:      return "HDD";
-    case DRIVE_TYPE_SSD_SATA: return "SSD (SATA)";
+    case DRIVE_TYPE_SSD_SATA: return "SSD SATA";
     case DRIVE_TYPE_NVME:     return "NVMe SSD";
-    case DRIVE_TYPE_USB:      return "USB/External";
-    case DRIVE_TYPE_M2_SATA:  return "M.2 SATA SSD";
+    case DRIVE_TYPE_USB:      return "USB";
+    case DRIVE_TYPE_M2_SATA:  return "M.2 SATA";
     case DRIVE_TYPE_EMMC:     return "eMMC";
-    case DRIVE_TYPE_SD:       return "SD Card";
-    case DRIVE_TYPE_SCSI:     return "SCSI/SAS";
-    default:                  return "Unknown";
+    case DRIVE_TYPE_SD:       return "SD";
+    case DRIVE_TYPE_SCSI:     return "SAS";
+    default:                  return "Неизвестно";
     }
 }
 
@@ -476,11 +759,11 @@ const char* GetAccessMethodName(SMART_ACCESS_METHOD eMethod)
 const char* GetHealthStatusName(DRIVE_HEALTH_STATUS eStatus)
 {
     switch (eStatus) {
-    case HEALTH_STATUS_GOOD:     return "Good";
-    case HEALTH_STATUS_CAUTION:  return "Caution";
-    case HEALTH_STATUS_BAD:      return "Bad";
-    case HEALTH_STATUS_WARNING:  return "Warning";
-    default:                     return "Unknown";
+    case HEALTH_STATUS_GOOD:     return "Хорошо";
+    case HEALTH_STATUS_CAUTION:  return "Внимание";
+    case HEALTH_STATUS_BAD:      return "Плохо";
+    case HEALTH_STATUS_WARNING:  return "Внимание";
+    default:                     return "Неизвестно";
     }
 }
 
@@ -644,7 +927,7 @@ BOOL OpenDrive(int nDrive, HANDLE* phDrive)
     *phDrive = CreateFileA(szPath,
         GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
-        NULL, OPEN_EXISTING, 0, NULL);
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 
     if (*phDrive == INVALID_HANDLE_VALUE) {
         *phDrive = CreateFileA(szPath, GENERIC_READ,
@@ -672,21 +955,36 @@ BOOL OpenDriveReadOnly(int nDrive, HANDLE* phDrive)
 BYTE GetStorageBusType(HANDLE hDrive)
 {
     STORAGE_PROPERTY_QUERY spq;
+    BYTE outBuf[1024];
+    DWORD dwBytes = 0;
+
+    /* Device descriptor BusType is the drive itself (17 = NVMe).
+     * The old code read byte 8 of STORAGE_ADAPTER_DESCRIPTOR, which is
+     * MaximumTransferLength, not BusType (offset 24). That made native
+     * NVMe look like SCSI/USB and skip the NVMe SMART path. */
+    ZeroMemory(&spq, sizeof(spq));
+    spq.PropertyId = StorageDeviceProperty;
+    spq.QueryType  = PropertyStandardQuery;
+    ZeroMemory(outBuf, sizeof(outBuf));
+    if (DeviceIoControl(hDrive, IOCTL_STORAGE_QUERY_PROPERTY,
+                        &spq, sizeof(spq), outBuf, sizeof(outBuf),
+                        &dwBytes, NULL) &&
+        dwBytes >= offsetof(STORAGE_DEVICE_DESCRIPTOR, BusType) + sizeof(BYTE)) {
+        STORAGE_DEVICE_DESCRIPTOR* pDesc = (STORAGE_DEVICE_DESCRIPTOR*)outBuf;
+        return (BYTE)pDesc->BusType;
+    }
+
     ZeroMemory(&spq, sizeof(spq));
     spq.PropertyId = StorageAdapterProperty;
     spq.QueryType  = PropertyStandardQuery;
-
-    BYTE outBuf[512];
     ZeroMemory(outBuf, sizeof(outBuf));
-    DWORD dwBytes = 0;
+    dwBytes = 0;
+    if (DeviceIoControl(hDrive, IOCTL_STORAGE_QUERY_PROPERTY,
+                        &spq, sizeof(spq), outBuf, sizeof(outBuf),
+                        &dwBytes, NULL) && dwBytes >= 25)
+        return outBuf[24];
 
-    if (!DeviceIoControl(hDrive, IOCTL_STORAGE_QUERY_PROPERTY,
-                         &spq, sizeof(spq), outBuf, sizeof(outBuf),
-                         &dwBytes, NULL))
-        return 0;
-
-    if (dwBytes < 9) return 0;
-    return outBuf[8];
+    return 0;
 }
 
 BOOL IsUSBDrive(HANDLE hDrive)
@@ -705,26 +1003,22 @@ BOOL IsNVMeDrive(HANDLE hDrive)
     BYTE bBusType = GetStorageBusType(hDrive);
     if (bBusType == 17) return TRUE;
 
-    BYTE buf[sizeof(MY_STORAGE_PROTOCOL_QUERY) + sizeof(NVME_HEALTH_INFO_LOG) + 64];
-    ZeroMemory(buf, sizeof(buf));
-    MY_STORAGE_PROTOCOL_QUERY* pQ = (MY_STORAGE_PROTOCOL_QUERY*)buf;
-    DWORD dwBytes = 0;
-
-    pQ->PropertyId = (ULONG)StorageDeviceProtocolSpecificProperty;
-    pQ->QueryType  = 0;
-    pQ->ProtocolSpecific.ProtocolType             = MY_ProtocolTypeNvme;
-    pQ->ProtocolSpecific.DataType                 = MY_NVMeDataTypeLogPage;
-    pQ->ProtocolSpecific.ProtocolDataRequestValue = NVME_LOG_PAGE_HEALTH_INFO;
-    pQ->ProtocolSpecific.ProtocolDataOffset       = sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA);
-    pQ->ProtocolSpecific.ProtocolDataLength       = sizeof(NVME_HEALTH_INFO_LOG);
-
-    if (DeviceIoControl(hDrive, IOCTL_STORAGE_QUERY_PROPERTY,
-                        buf, sizeof(buf), buf, sizeof(buf), &dwBytes, NULL) &&
-        dwBytes >= (ULONG)(sizeof(ULONG)*2 + sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA) + 8)) {
-        BYTE* pData = buf + sizeof(ULONG)*2 + sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA);
-        DWORD dwPayload = dwBytes - (sizeof(ULONG)*2 + sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA));
-        if (dwPayload > sizeof(NVME_HEALTH_INFO_LOG)) dwPayload = sizeof(NVME_HEALTH_INFO_LOG);
-        if (!IsBufferAllZero(pData, (int)dwPayload))
+    /* Bus 8 = RAID (Intel RST/VMD often owns NVMe). Still try a safe
+     * Health Info Log query — if it works, this is NVMe. */
+    {
+        BYTE health[sizeof(NVME_HEALTH_INFO_LOG)];
+        DWORD nCopied = 0;
+        ZeroMemory(health, sizeof(health));
+        if (QueryNVMeProtocol(hDrive, MY_NVMeDataTypeLogPage, NVME_LOG_PAGE_HEALTH_INFO,
+                              health, sizeof(health), &nCopied))
+            return TRUE;
+    }
+    {
+        BYTE ident[256];
+        DWORD nCopied = 0;
+        ZeroMemory(ident, sizeof(ident));
+        if (QueryNVMeProtocol(hDrive, MY_NVMeDataTypeIdentify, 1,
+                              ident, sizeof(ident), &nCopied))
             return TRUE;
     }
 
@@ -1281,12 +1575,8 @@ BOOL GetIdentifyData(HANDLE hDrive, int nDrive, DRIVE_INFO* pInfo)
      * 0x0001 = non-rotating (SSD), >= 0x0401 = RPM */
     pInfo->wRotationRate = pIdent[217];
 
-    /* Word 76: Serial ATA Capabilities 
-     * Bit 1 = SATA/150, Bit 2 = SATA/300, Bit 3 = SATA/600
-     * Used to determine max transfer mode */
-    if (pIdent[76] & 0x0002) { /* SATA/150 */ }
-    if (pIdent[76] & 0x0004) { /* SATA/300 */ }
-    if (pIdent[76] & 0x0008) { /* SATA/600 */ }
+    /* Word 76/77: SATA gen / negotiated speed → szProtocol */
+    FillAtaProtocolFromIdent(pInfo, pIdent);
 
     /* Word 88: Ultra DMA mode support 
      * for performance calculation — current vs max UDMA mode)
@@ -1627,6 +1917,7 @@ BOOL GetIdentifyDataATAPassthrough(HANDLE hDrive, DRIVE_INFO* pInfo)
     pInfo->bSMART_Supported = (pIdent[82] & 0x0001) ? TRUE : FALSE;
     pInfo->bSMART_Enabled   = (pIdent[85] & 0x0001) ? TRUE : FALSE;
     pInfo->wRotationRate    = pIdent[217];
+    FillAtaProtocolFromIdent(pInfo, pIdent);
     return TRUE;
 }
 
@@ -1864,6 +2155,7 @@ BOOL GetIdentifyDataSAT(HANDLE hDrive, DRIVE_INFO* pInfo)
     pInfo->bIsUSB           = TRUE;
     pInfo->eAccessMethod    = method;
     pInfo->wRotationRate    = pIdent[217];
+    FillAtaProtocolFromIdent(pInfo, pIdent);
     return TRUE;
 }
 
@@ -2006,8 +2298,13 @@ BOOL GetIdentifyDataUSB(HANDLE hDrive, DRIVE_INFO* pInfo)
 
     pInfo->bSMART_Supported = FALSE;
     pInfo->bSMART_Enabled   = FALSE;
-    pInfo->bIsUSB           = TRUE;
-    pInfo->eType            = DRIVE_TYPE_USB;
+    /* Only mark USB when the bus really is USB. Native NVMe is a SCSI
+     * device to Windows; treating it as USB sent it down SCSI Log Sense
+     * instead of the NVMe Health Log. */
+    if (GetStorageBusType(hDrive) == 7) {
+        pInfo->bIsUSB = TRUE;
+        pInfo->eType  = DRIVE_TYPE_USB;
+    }
     pInfo->nHealthPercent   = -1;
     pInfo->eAccessMethod    = SMART_ACCESS_STORAGE_QUERY;
     return (pInfo->szModel[0] != '\0');
@@ -2069,39 +2366,36 @@ BOOL GetSMARTViaStorageProtocol(HANDLE hDrive, DRIVE_INFO* pInfo)
  * ============================================================ */
 BOOL GetNVMeIdentifyController(HANDLE hDrive, DRIVE_INFO* pInfo)
 {
-    BYTE buf[sizeof(MY_STORAGE_PROTOCOL_QUERY) + 4096 + 64];
-    ZeroMemory(buf, sizeof(buf));
-    MY_STORAGE_PROTOCOL_QUERY* pQ = (MY_STORAGE_PROTOCOL_QUERY*)buf;
-    DWORD dwBytes = 0;
+    BYTE ident[4096];
+    DWORD nCopied = 0;
+    ZeroMemory(ident, sizeof(ident));
 
-    pQ->PropertyId = (ULONG)StorageDeviceProtocolSpecificProperty;
-    pQ->QueryType  = 0;
-    pQ->ProtocolSpecific.ProtocolType             = MY_ProtocolTypeNvme;
-    pQ->ProtocolSpecific.DataType                 = MY_NVMeDataTypeIdentify;
-    pQ->ProtocolSpecific.ProtocolDataRequestValue = 1; /* Controller identify */
-    pQ->ProtocolSpecific.ProtocolDataOffset       = sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA);
-    pQ->ProtocolSpecific.ProtocolDataLength       = 4096;
-
-    if (!DeviceIoControl(hDrive, IOCTL_STORAGE_QUERY_PROPERTY,
-            buf, sizeof(buf), buf, sizeof(buf), &dwBytes, NULL) || dwBytes < 128)
+    /* Native NvmeMini / protocol query on a USB handle crashes RTL9210. */
+    if (GetStorageBusType(hDrive) == 7)
         return FALSE;
 
-    BYTE* pData = buf + sizeof(ULONG)*2 + sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA);
+    if (!QueryNVMeProtocol(hDrive, MY_NVMeDataTypeIdentify, 1,
+                           ident, sizeof(ident), &nCopied) || nCopied < 72) {
+        nCopied = 4096;
+        if (!NvmeMiniportAdmin(hDrive, 6, 0, 1, ident, 4096) &&
+            !NvmeIntelRstAdmin(hDrive, 0x06, 0, 1, ident, 4096))
+            return FALSE;
+    }
 
-    /* Store full identify controller data */
-    memcpy(&pInfo->nvmeIdent, pData, sizeof(NVME_IDENTIFY_CONTROLLER));
+    /* Store identify controller data (never more than the 4096-byte page). */
+    CopyNvmeIdentBuf(pInfo, ident, nCopied ? nCopied : 4096);
     pInfo->bGotNVMeIdent = TRUE;
 
     /* Extract key strings (NVMe uses direct ASCII, no byte-swap needed) */
-    memcpy(pInfo->szSerial, pData + 4, 20);
+    memcpy(pInfo->szSerial, ident + 4, 20);
     pInfo->szSerial[20] = '\0';
     TrimStr(pInfo->szSerial);
 
-    memcpy(pInfo->szModel, pData + 24, 40);
+    memcpy(pInfo->szModel, ident + 24, 40);
     pInfo->szModel[40] = '\0';
     TrimStr(pInfo->szModel);
 
-    memcpy(pInfo->szFirmware, pData + 64, 8);
+    memcpy(pInfo->szFirmware, ident + 64, 8);
     pInfo->szFirmware[8] = '\0';
     TrimStr(pInfo->szFirmware);
 
@@ -2114,40 +2408,18 @@ BOOL GetNVMeIdentifyController(HANDLE hDrive, DRIVE_INFO* pInfo)
 
 BOOL GetNVMeHealthLog(HANDLE hDrive, DRIVE_INFO* pInfo)
 {
-    BYTE buf[sizeof(MY_STORAGE_PROTOCOL_QUERY) + sizeof(NVME_HEALTH_INFO_LOG) + 64];
-    ZeroMemory(buf, sizeof(buf));
-    MY_STORAGE_PROTOCOL_QUERY* pQ = (MY_STORAGE_PROTOCOL_QUERY*)buf;
-    DWORD dwBytes = 0;
+    BYTE health[sizeof(NVME_HEALTH_INFO_LOG)];
+    DWORD nCopied = 0;
+    ZeroMemory(health, sizeof(health));
 
-    pQ->PropertyId = (ULONG)StorageDeviceProtocolSpecificProperty;
-    pQ->QueryType  = 0;
-    pQ->ProtocolSpecific.ProtocolType             = MY_ProtocolTypeNvme;
-    pQ->ProtocolSpecific.DataType                 = MY_NVMeDataTypeLogPage;
-    pQ->ProtocolSpecific.ProtocolDataRequestValue = NVME_LOG_PAGE_HEALTH_INFO;
-    pQ->ProtocolSpecific.ProtocolDataOffset       = sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA);
-    pQ->ProtocolSpecific.ProtocolDataLength       = sizeof(NVME_HEALTH_INFO_LOG);
-
-    if (!DeviceIoControl(hDrive, IOCTL_STORAGE_QUERY_PROPERTY,
-            buf, sizeof(buf), buf, sizeof(buf), &dwBytes, NULL) ||
-        dwBytes < (ULONG)(sizeof(ULONG)*2 + sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA) + 8)) {
-        pInfo->dwErrNvmeProtocol = GetLastError();
+    if (!QueryNVMeProtocol(hDrive, MY_NVMeDataTypeLogPage, NVME_LOG_PAGE_HEALTH_INFO,
+                           health, sizeof(health), &nCopied)) {
+        pInfo->dwErrNvmeProtocol = g_dwLastNvmeQueryErr ? g_dwLastNvmeQueryErr : GetLastError();
         return FALSE;
     }
 
-    BYTE* pData = buf + sizeof(ULONG)*2 + sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA);
-
-    if (IsBufferAllZero(pData, 64)) {
-        BOOL bAnyNonZero = FALSE;
-        int i;
-        for (i = 64; i < (int)sizeof(NVME_HEALTH_INFO_LOG); i++)
-            if (pData[i] != 0) { bAnyNonZero = TRUE; break; }
-        if (!bAnyNonZero) {
-            pInfo->dwErrNvmeProtocol = ERROR_INVALID_DATA;
-            return FALSE;
-        }
-    }
-
-    memcpy(&pInfo->nvmeHealth, pData, sizeof(NVME_HEALTH_INFO_LOG));
+    memcpy(&pInfo->nvmeHealth, health,
+           nCopied < sizeof(NVME_HEALTH_INFO_LOG) ? nCopied : sizeof(NVME_HEALTH_INFO_LOG));
     pInfo->bIsNVMe          = TRUE;
     pInfo->bSMART_Supported = TRUE;
     pInfo->bSMART_Enabled   = TRUE;
@@ -2158,42 +2430,8 @@ BOOL GetNVMeHealthLog(HANDLE hDrive, DRIVE_INFO* pInfo)
 
 BOOL GetNVMeHealthLogFallback(HANDLE hDrive, DRIVE_INFO* pInfo)
 {
-    const DWORD dwBufSize = 4096;
-    BYTE* pBuf = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwBufSize);
-    if (!pBuf) return FALSE;
-
-    MY_STORAGE_PROTOCOL_QUERY* pq = (MY_STORAGE_PROTOCOL_QUERY*)pBuf;
-    pq->PropertyId = (ULONG)StorageDeviceProtocolSpecificProperty;
-    pq->QueryType  = 0;
-    pq->ProtocolSpecific.ProtocolType             = MY_ProtocolTypeNvme;
-    pq->ProtocolSpecific.DataType                 = MY_NVMeDataTypeLogPage;
-    pq->ProtocolSpecific.ProtocolDataRequestValue = NVME_LOG_PAGE_HEALTH_INFO;
-    pq->ProtocolSpecific.ProtocolDataOffset       = sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA);
-    pq->ProtocolSpecific.ProtocolDataLength       = sizeof(NVME_HEALTH_INFO_LOG);
-
-    DWORD dwBytes = 0;
-    BOOL bOK = DeviceIoControl(hDrive, IOCTL_STORAGE_QUERY_PROPERTY,
-        pBuf, dwBufSize, pBuf, dwBufSize, &dwBytes, NULL);
-
-    if (!bOK || dwBytes < (DWORD)(sizeof(ULONG)*2 + sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA) + 8)) {
-        HeapFree(GetProcessHeap(), 0, pBuf);
-        return FALSE;
-    }
-
-    BYTE* pData = pBuf + sizeof(ULONG)*2 + sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA);
-    if (IsBufferAllZero(pData, 16)) {
-        HeapFree(GetProcessHeap(), 0, pBuf);
-        return FALSE;
-    }
-
-    memcpy(&pInfo->nvmeHealth, pData, sizeof(NVME_HEALTH_INFO_LOG));
-    pInfo->bIsNVMe          = TRUE;
-    pInfo->bSMART_Supported = TRUE;
-    pInfo->bSMART_Enabled   = TRUE;
-    pInfo->eAccessMethod    = SMART_ACCESS_NVME_PROTOCOL;
-
-    HeapFree(GetProcessHeap(), 0, pBuf);
-    return TRUE;
+    /* QueryNVMeProtocol already tries adapter vs device and several NSIDs. */
+    return GetNVMeHealthLog(hDrive, pInfo);
 }
 
 BOOL GetNVMeHealthLogPassthrough(HANDLE hDrive, DRIVE_INFO* pInfo)
@@ -2276,14 +2514,186 @@ BOOL GetNVMeHealthLogPassthrough(HANDLE hDrive, DRIVE_INFO* pInfo)
     return TRUE;
 }
 
+
+#ifndef NVME_PASS_THROUGH_SRB_IO_CODE
+#define NVME_STORPORT_DRIVER 0xE000
+#define NVME_PASS_THROUGH_SRB_IO_CODE CTL_CODE(NVME_STORPORT_DRIVER, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#endif
+#ifndef IOCTL_INTEL_NVME_PASS_THROUGH
+#define IOCTL_INTEL_NVME_PASS_THROUGH CTL_CODE(0xf000, 0xA02, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#endif
+
+#pragma pack(push, 1)
+typedef struct _MY_SRB_IO_CONTROL {
+    ULONG HeaderLength;
+    UCHAR Signature[8];
+    ULONG Timeout;
+    ULONG ControlCode;
+    ULONG ReturnCode;
+    ULONG Length;
+} MY_SRB_IO_CONTROL;
+
+typedef struct _MY_NVME_PT {
+    MY_SRB_IO_CONTROL SrbIoCtrl;
+    DWORD VendorSpecific[6];
+    DWORD NVMeCmd[16];
+    DWORD CplEntry[4];
+    DWORD Direction;
+    DWORD QueueId;
+    DWORD DataBufferLen;
+    DWORD MetaDataLen;
+    DWORD ReturnBufferLen;
+    UCHAR DataBuffer[4096];
+} MY_NVME_PT;
+
+typedef struct _MY_INTEL_NVME_PT {
+    MY_SRB_IO_CONTROL SRB;
+    BYTE  Version;
+    BYTE  PathId;
+    BYTE  TargetId;
+    BYTE  Lun;
+    DWORD NVMeCmd[16];
+    DWORD CplEntry[4];
+    DWORD QueueId;
+    DWORD ParamBufLen;
+    DWORD ReturnBufferLen;
+    BYTE  Rsvd[0x28];
+    BYTE  DataBuffer[0x1000];
+} MY_INTEL_NVME_PT;
+#pragma pack(pop)
+
+static HANDLE OpenScsiAdapterFromDrive(HANDLE hDrive, SCSI_ADDRESS* pAddr)
+{
+    SCSI_ADDRESS addr;
+    DWORD dw = 0;
+    char sz[32];
+    HANDLE hScsi;
+    ZeroMemory(&addr, sizeof(addr));
+    addr.Length = sizeof(addr);
+    if (!DeviceIoControl(hDrive, IOCTL_SCSI_GET_ADDRESS,
+            NULL, 0, &addr, sizeof(addr), &dw, NULL))
+        return INVALID_HANDLE_VALUE;
+    if (pAddr) *pAddr = addr;
+    _snprintf(sz, sizeof(sz), "\\\\.\\Scsi%d:", (int)addr.PortNumber);
+    hScsi = CreateFileA(sz, GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, NULL);
+    return hScsi;
+}
+
+static BOOL BufferHasData(const BYTE* p, int n)
+{
+    int i;
+    DWORD sum = 0;
+    for (i = 0; i < n; i++) sum += p[i];
+    return sum != 0;
+}
+
+static BOOL NvmeMiniportAdmin(HANDLE hDrive, DWORD cdw0, DWORD nsid, DWORD cdw10,
+                              BYTE* pOut, DWORD dwOut)
+{
+    SCSI_ADDRESS addr;
+    HANDLE hScsi = OpenScsiAdapterFromDrive(hDrive, &addr);
+    MY_NVME_PT* pt;
+    DWORD dwRet = 0;
+    BOOL ok;
+    if (hScsi == INVALID_HANDLE_VALUE) return FALSE;
+    pt = (MY_NVME_PT*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(MY_NVME_PT));
+    if (!pt) { CloseHandle(hScsi); return FALSE; }
+    pt->SrbIoCtrl.HeaderLength = sizeof(MY_SRB_IO_CONTROL);
+    memcpy(pt->SrbIoCtrl.Signature, "NvmeMini", 8);
+    pt->SrbIoCtrl.Timeout = 40;
+    pt->SrbIoCtrl.ControlCode = NVME_PASS_THROUGH_SRB_IO_CODE;
+    pt->SrbIoCtrl.Length = sizeof(MY_NVME_PT) - sizeof(MY_SRB_IO_CONTROL);
+    pt->Direction = 2;
+    pt->DataBufferLen = 4096;
+    pt->ReturnBufferLen = sizeof(MY_NVME_PT);
+    pt->NVMeCmd[0] = cdw0;
+    pt->NVMeCmd[1] = nsid;
+    pt->NVMeCmd[10] = cdw10;
+    ok = DeviceIoControl(hScsi, IOCTL_SCSI_MINIPORT, pt, sizeof(*pt), pt, sizeof(*pt), &dwRet, NULL);
+    CloseHandle(hScsi);
+    if (!ok) {
+        g_dwLastNvmeQueryErr = GetLastError();
+        HeapFree(GetProcessHeap(), 0, pt);
+        return FALSE;
+    }
+    if (!BufferHasData(pt->DataBuffer, 64)) {
+        HeapFree(GetProcessHeap(), 0, pt);
+        return FALSE;
+    }
+    memcpy(pOut, pt->DataBuffer, dwOut);
+    HeapFree(GetProcessHeap(), 0, pt);
+    return TRUE;
+}
+
+static BOOL NvmeIntelRstAdmin(HANDLE hDrive, DWORD opcode, DWORD nsid, DWORD cdw10,
+                              BYTE* pOut, DWORD dwOut)
+{
+    SCSI_ADDRESS addr;
+    HANDLE hScsi = OpenScsiAdapterFromDrive(hDrive, &addr);
+    MY_INTEL_NVME_PT* pt;
+    DWORD dwRet = 0;
+    BOOL ok;
+    if (hScsi == INVALID_HANDLE_VALUE) return FALSE;
+    pt = (MY_INTEL_NVME_PT*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(MY_INTEL_NVME_PT));
+    if (!pt) { CloseHandle(hScsi); return FALSE; }
+    pt->SRB.HeaderLength = sizeof(MY_SRB_IO_CONTROL);
+    memcpy(pt->SRB.Signature, "IntelNvm", 8);
+    pt->SRB.Timeout = 10;
+    pt->SRB.ControlCode = IOCTL_INTEL_NVME_PASS_THROUGH;
+    pt->SRB.Length = sizeof(MY_INTEL_NVME_PT) - sizeof(MY_SRB_IO_CONTROL);
+    pt->Version = 1;
+    pt->PathId = addr.PathId;
+    pt->NVMeCmd[0] = opcode;
+    pt->NVMeCmd[1] = nsid;
+    pt->NVMeCmd[10] = cdw10;
+    pt->ParamBufLen = sizeof(MY_INTEL_NVME_PT) - 0x1000;
+    pt->ReturnBufferLen = 0x1000;
+    ok = DeviceIoControl(hScsi, IOCTL_SCSI_MINIPORT, pt, sizeof(*pt), pt, sizeof(*pt), &dwRet, NULL);
+    CloseHandle(hScsi);
+    if (!ok) {
+        g_dwLastNvmeQueryErr = GetLastError();
+        HeapFree(GetProcessHeap(), 0, pt);
+        return FALSE;
+    }
+    if (!BufferHasData(pt->DataBuffer, 64)) {
+        HeapFree(GetProcessHeap(), 0, pt);
+        return FALSE;
+    }
+    memcpy(pOut, pt->DataBuffer, dwOut);
+    HeapFree(GetProcessHeap(), 0, pt);
+    return TRUE;
+}
+
+static BOOL FillNvmeHealthFromBuf(DRIVE_INFO* pInfo, BYTE* health, DWORD n)
+{
+    memcpy(&pInfo->nvmeHealth, health,
+           n < sizeof(NVME_HEALTH_INFO_LOG) ? n : sizeof(NVME_HEALTH_INFO_LOG));
+    pInfo->bIsNVMe = TRUE;
+    pInfo->bSMART_Supported = TRUE;
+    pInfo->bSMART_Enabled = TRUE;
+    pInfo->eAccessMethod = SMART_ACCESS_NVME_PROTOCOL;
+    return TRUE;
+}
+
 BOOL GetNVMeHealthLogEx(HANDLE hDrive, DRIVE_INFO* pInfo)
 {
-    /* Do not call GetNVMeHealthLogPassthrough here.
-     * IOCTL_STORAGE_PROTOCOL_COMMAND with a hand-built NVMe admin command
-     * can bugcheck Microsoft nvme.sys (DRIVER_IRQL_NOT_LESS_OR_EQUAL / 0xD1)
-     * during startup ScanDrives. See issue #1. */
+    BYTE health[512];
+    /* Native NvmeMini IOCTL on a USB handle crashes RTL9210 (and is
+     * meaningless on USB SAT). Never run this path on bus type 7. */
+    if (GetStorageBusType(hDrive) == 7)
+        return FALSE;
+    /* Do not call GetNVMeHealthLogPassthrough / IOCTL_STORAGE_PROTOCOL_COMMAND.
+     * That IOCTL bugchecked nvme.sys (issue #1). SCSI miniport is the
+     * CrystalDiskInfo path used when QUERY_PROPERTY returns ERROR_INVALID_FUNCTION. */
     if (GetNVMeHealthLog(hDrive, pInfo)) return TRUE;
     if (GetNVMeHealthLogFallback(hDrive, pInfo)) return TRUE;
+    ZeroMemory(health, sizeof(health));
+    if (NvmeMiniportAdmin(hDrive, 2, 0xFFFFFFFFu, 0x007f0002, health, sizeof(health)))
+        return FillNvmeHealthFromBuf(pInfo, health, sizeof(health));
+    if (NvmeIntelRstAdmin(hDrive, 0x02, 0xFFFFFFFFu, 0x007f0002, health, sizeof(health)))
+        return FillNvmeHealthFromBuf(pInfo, health, sizeof(health));
     return FALSE;
 }
 
@@ -2333,6 +2743,8 @@ static BOOL GetNVMeInfo(HANDLE hDrive, DRIVE_INFO* pInfo)
 
     if (GetNVMeHealthLogEx(hDrive, pInfo)) {
         ExtractNVMeExtendedInfo(pInfo);
+    } else {
+        GetSMARTViaLogSense(hDrive, pInfo);
     }
 
     pInfo->eType   = DRIVE_TYPE_NVME;
@@ -2353,8 +2765,8 @@ DRIVE_TYPE DetectDriveType(HANDLE hDrive, DRIVE_INFO* pInfo)
 
     BYTE bus = GetStorageBusType(hDrive);
     if (bus == 12 || bus == 13) return DRIVE_TYPE_EMMC;
-    if (bus == 11) return DRIVE_TYPE_SCSI;
     if (bus == 10) return DRIVE_TYPE_SCSI;
+    /* bus 11 = SATA: HDD vs SSD decided by rotation rate below */
     if (bus == 7  && !pInfo->bSMART_Supported) return DRIVE_TYPE_USB;
 
     /* Use stored rotation rate from IDENTIFY if available */
@@ -3018,7 +3430,7 @@ static int FillSmartThreshold(DRIVE_INFO* pInfo, const BYTE* pRawBuf)
  * Prefers ATA Pass-Through for internal drives
  * but SAT-first for USB drives (bridge chips need SCSI commands).
  * ============================================================ */
-static BOOL AcquireATASMART(HANDLE hDrive, int nDrive, DRIVE_INFO* pInfo)
+static BOOL AcquireATASMART(HANDLE hDrive, int nDrive, DRIVE_INFO* pInfo, BOOL bReadLogs)
 {
     BOOL bAttr = FALSE, bThresh = FALSE;
 
@@ -3078,14 +3490,17 @@ static BOOL AcquireATASMART(HANDLE hDrive, int nDrive, DRIVE_INFO* pInfo)
         ExtractCommonATACounters(pInfo);
         ExtractSSDIndicators(pInfo);
 
-        /* Read SMART error log and self-test log  */
-        if (!GetSMARTErrorLog(hDrive, nDrive, pInfo)) {
-            if (!GetSMARTErrorLogATAPassthrough(hDrive, pInfo))
-                GetSMARTErrorLogSAT(hDrive, pInfo);
-        }
-        if (!GetSMARTSelfTestLog(hDrive, nDrive, pInfo)) {
-            if (!GetSMARTSelfTestLogATAPassthrough(hDrive, pInfo))
-                GetSMARTSelfTestLogSAT(hDrive, pInfo);
+        /* SMART error / self-test logs: full scan only. Extra SMART READ LOG
+         * on USB/HDD every refresh can AV the usbstor/atapi stack. */
+        if (bReadLogs) {
+            if (!GetSMARTErrorLog(hDrive, nDrive, pInfo)) {
+                if (!GetSMARTErrorLogATAPassthrough(hDrive, pInfo))
+                    GetSMARTErrorLogSAT(hDrive, pInfo);
+            }
+            if (!GetSMARTSelfTestLog(hDrive, nDrive, pInfo)) {
+                if (!GetSMARTSelfTestLogATAPassthrough(hDrive, pInfo))
+                    GetSMARTSelfTestLogSAT(hDrive, pInfo);
+            }
         }
     } else {
         pInfo->bSMART_Supported = FALSE;
@@ -3193,6 +3608,25 @@ typedef struct _CDI_SAT_PASSTHROUGH_BUF_4K {
     BYTE   DataBuf[4096];
 } CDI_SAT_PASSTHROUGH_BUF_4K;
 
+/* Heap SPT buffer for Realtek 0xE4 (Identify 4096 / Health 512).
+ * Stack 4K SPT was OK for a single probe; keep it off the stack anyway. */
+static CDI_SAT_PASSTHROUGH_BUF_4K* AllocSptBuf4K(void)
+{
+    CDI_SAT_PASSTHROUGH_BUF_4K* p =
+        (CDI_SAT_PASSTHROUGH_BUF_4K*)VirtualAlloc(
+            NULL, sizeof(CDI_SAT_PASSTHROUGH_BUF_4K),
+            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (p)
+        ZeroMemory(p, sizeof(*p));
+    return p;
+}
+
+static void FreeSptBuf4K(CDI_SAT_PASSTHROUGH_BUF_4K* p)
+{
+    if (p)
+        VirtualFree(p, 0, MEM_RELEASE);
+}
+
 static BOOL NVMeIdentifyJMicron(HANDLE hDrive, DRIVE_INFO* pInfo)
 {
     CDI_SAT_PASSTHROUGH_BUF_4K sptwb;
@@ -3273,7 +3707,7 @@ static BOOL NVMeIdentifyJMicron(HANDLE hDrive, DRIVE_INFO* pInfo)
         TrimStr(pInfo->szFirmware);
 
         pInfo->bGotNVMeIdent = TRUE;
-        memcpy(&pInfo->nvmeIdent, pIdentBuf, sizeof(NVME_IDENTIFY_CONTROLLER));
+        CopyNvmeIdentBuf(pInfo, pIdentBuf, 4096);
 
         /* Extract temperature thresholds from NVMe Identify */
         pInfo->wNVMeWarnTempThreshold = ReadLE16(pInfo->nvmeIdent.WCTEMP);
@@ -3403,7 +3837,7 @@ static BOOL NVMeIdentifyASMedia(HANDLE hDrive, DRIVE_INFO* pInfo)
         TrimStr(pInfo->szFirmware);
 
         pInfo->bGotNVMeIdent = TRUE;
-        memcpy(&pInfo->nvmeIdent, pIdentBuf, sizeof(NVME_IDENTIFY_CONTROLLER));
+        CopyNvmeIdentBuf(pInfo, pIdentBuf, 4096);
 
         /* Extract temperature thresholds from NVMe Identify */
         pInfo->wNVMeWarnTempThreshold = ReadLE16(pInfo->nvmeIdent.WCTEMP);
@@ -3459,38 +3893,45 @@ static BOOL NVMeHealthLogASMedia(HANDLE hDrive, DRIVE_INFO* pInfo)
  * ============================================================ */
 static BOOL NVMeIdentifyRealtek(HANDLE hDrive, DRIVE_INFO* pInfo)
 {
-    CDI_SAT_PASSTHROUGH_BUF_4K sptwb;
+    CDI_SAT_PASSTHROUGH_BUF_4K* psptwb;
     DWORD dwReturned = 0;
     DWORD length;
+    BYTE* pIdentBuf;
+    BOOL bOk;
 
-    ZeroMemory(&sptwb, sizeof(sptwb));
-    sptwb.spt.Length             = sizeof(SCSI_PASS_THROUGH);
-    sptwb.spt.PathId             = 0;
-    sptwb.spt.TargetId           = 0;
-    sptwb.spt.Lun                = 0;
-    sptwb.spt.SenseInfoLength    = 32;
-    sptwb.spt.DataIn             = SCSI_IOCTL_DATA_IN;
-    sptwb.spt.DataTransferLength = 4096;
-    sptwb.spt.TimeOutValue       = 10;
-    sptwb.spt.DataBufferOffset   = offsetof(CDI_SAT_PASSTHROUGH_BUF_4K, DataBuf);
-    sptwb.spt.SenseInfoOffset    = offsetof(CDI_SAT_PASSTHROUGH_BUF_4K, SenseBuf);
-    sptwb.spt.CdbLength          = 16;
+    psptwb = AllocSptBuf4K();
+    if (!psptwb)
+        return FALSE;
 
-    sptwb.spt.Cdb[0] = 0xE4;   /* Realtek NVMe Read */
-    sptwb.spt.Cdb[1] = (BYTE)(4096);         /* Transfer length low */
-    sptwb.spt.Cdb[2] = (BYTE)(4096 >> 8);    /* Transfer length high */
-    sptwb.spt.Cdb[3] = 0x06;   /* Identify */
-    sptwb.spt.Cdb[4] = 0x01;   /* CNS = 1 */
+    psptwb->spt.Length             = sizeof(SCSI_PASS_THROUGH);
+    psptwb->spt.PathId             = 0;
+    psptwb->spt.TargetId           = 0;
+    psptwb->spt.Lun                = 0;
+    psptwb->spt.SenseInfoLength    = 32;
+    psptwb->spt.DataIn             = SCSI_IOCTL_DATA_IN;
+    psptwb->spt.DataTransferLength = 4096;
+    psptwb->spt.TimeOutValue       = 8;
+    psptwb->spt.DataBufferOffset   = offsetof(CDI_SAT_PASSTHROUGH_BUF_4K, DataBuf);
+    psptwb->spt.SenseInfoOffset    = offsetof(CDI_SAT_PASSTHROUGH_BUF_4K, SenseBuf);
+    psptwb->spt.CdbLength          = 16;
+
+    psptwb->spt.Cdb[0] = 0xE4;   /* Realtek NVMe Read — never 0xE5 (write) */
+    psptwb->spt.Cdb[1] = (BYTE)(4096);         /* Transfer length low */
+    psptwb->spt.Cdb[2] = (BYTE)(4096 >> 8);    /* Transfer length high */
+    psptwb->spt.Cdb[3] = 0x06;   /* Identify */
+    psptwb->spt.Cdb[4] = 0x01;   /* CNS = 1 */
 
     length = offsetof(CDI_SAT_PASSTHROUGH_BUF_4K, DataBuf) + 4096;
 
     if (!DeviceIoControl(hDrive, IOCTL_SCSI_PASS_THROUGH,
-            &sptwb, length, &sptwb, length, &dwReturned, NULL))
+            psptwb, length, psptwb, length, &dwReturned, NULL)) {
+        FreeSptBuf4K(psptwb);
         return FALSE;
+    }
 
     /* NVMe Identify uses direct ASCII, no byte-swap needed.
-     * Uses memcpy for NVMe strings. */
-    BYTE* pIdentBuf = sptwb.DataBuf;
+     * CopyNvmeIdentBuf never copies more than 4096 into nvmeIdent. */
+    pIdentBuf = psptwb->DataBuf;
     if (!IsBufferAllZero(pIdentBuf, 64)) {
         memcpy(pInfo->szSerial, pIdentBuf + 4, 20);
         pInfo->szSerial[20] = '\0';
@@ -3505,54 +3946,67 @@ static BOOL NVMeIdentifyRealtek(HANDLE hDrive, DRIVE_INFO* pInfo)
         TrimStr(pInfo->szFirmware);
 
         pInfo->bGotNVMeIdent = TRUE;
-        memcpy(&pInfo->nvmeIdent, pIdentBuf, sizeof(NVME_IDENTIFY_CONTROLLER));
+        CopyNvmeIdentBuf(pInfo, pIdentBuf, 4096);
 
-        /* Extract temperature thresholds from NVMe Identify */
         pInfo->wNVMeWarnTempThreshold = ReadLE16(pInfo->nvmeIdent.WCTEMP);
         pInfo->wNVMeCritTempThreshold = ReadLE16(pInfo->nvmeIdent.CCTEMP);
     }
 
-    return (pInfo->szModel[0] != '\0');
+    bOk = (pInfo->szModel[0] != '\0');
+    FreeSptBuf4K(psptwb);
+    return bOk;
 }
 
 static BOOL NVMeHealthLogRealtek(HANDLE hDrive, DRIVE_INFO* pInfo)
 {
-    CDI_SAT_PASSTHROUGH_BUF_4K sptwb;
+    CDI_SAT_PASSTHROUGH_BUF_4K* psptwb;
     DWORD dwReturned = 0;
     DWORD length;
+    DWORD nCopy;
 
-    ZeroMemory(&sptwb, sizeof(sptwb));
-    sptwb.spt.Length             = sizeof(SCSI_PASS_THROUGH);
-    sptwb.spt.PathId             = 0;
-    sptwb.spt.TargetId           = 0;
-    sptwb.spt.Lun                = 0;
-    sptwb.spt.SenseInfoLength    = 32;
-    sptwb.spt.DataIn             = SCSI_IOCTL_DATA_IN;
-    sptwb.spt.DataTransferLength = 512;
-    sptwb.spt.TimeOutValue       = 10;
-    sptwb.spt.DataBufferOffset   = offsetof(CDI_SAT_PASSTHROUGH_BUF_4K, DataBuf);
-    sptwb.spt.SenseInfoOffset    = offsetof(CDI_SAT_PASSTHROUGH_BUF_4K, SenseBuf);
-    sptwb.spt.CdbLength          = 16;
+    psptwb = AllocSptBuf4K();
+    if (!psptwb)
+        return FALSE;
 
-    sptwb.spt.Cdb[0] = 0xE4;   /* Realtek NVMe Read */
-    sptwb.spt.Cdb[1] = (BYTE)(512);          /* Transfer length low */
-    sptwb.spt.Cdb[2] = (BYTE)(512 >> 8);     /* Transfer length high */
-    sptwb.spt.Cdb[3] = 0x02;   /* Get Log Page */
-    sptwb.spt.Cdb[4] = NVME_LOG_PAGE_HEALTH_INFO; /* Log page 02h */
+    psptwb->spt.Length             = sizeof(SCSI_PASS_THROUGH);
+    psptwb->spt.PathId             = 0;
+    psptwb->spt.TargetId           = 0;
+    psptwb->spt.Lun                = 0;
+    psptwb->spt.SenseInfoLength    = 32;
+    psptwb->spt.DataIn             = SCSI_IOCTL_DATA_IN;
+    psptwb->spt.DataTransferLength = 512;
+    psptwb->spt.TimeOutValue       = 8;
+    psptwb->spt.DataBufferOffset   = offsetof(CDI_SAT_PASSTHROUGH_BUF_4K, DataBuf);
+    psptwb->spt.SenseInfoOffset    = offsetof(CDI_SAT_PASSTHROUGH_BUF_4K, SenseBuf);
+    psptwb->spt.CdbLength          = 16;
+
+    psptwb->spt.Cdb[0] = 0xE4;   /* Realtek NVMe Read — never 0xE5 (write) */
+    psptwb->spt.Cdb[1] = (BYTE)(512);          /* Transfer length low */
+    psptwb->spt.Cdb[2] = (BYTE)(512 >> 8);     /* Transfer length high */
+    psptwb->spt.Cdb[3] = 0x02;   /* Get Log Page */
+    psptwb->spt.Cdb[4] = NVME_LOG_PAGE_HEALTH_INFO; /* Log page 02h */
 
     length = offsetof(CDI_SAT_PASSTHROUGH_BUF_4K, DataBuf) + 512;
 
     if (!DeviceIoControl(hDrive, IOCTL_SCSI_PASS_THROUGH,
-            &sptwb, length, &sptwb, length, &dwReturned, NULL))
+            psptwb, length, psptwb, length, &dwReturned, NULL)) {
+        FreeSptBuf4K(psptwb);
         return FALSE;
+    }
 
-    if (IsBufferAllZero(sptwb.DataBuf, sizeof(NVME_HEALTH_INFO_LOG)))
+    if (IsBufferAllZero(psptwb->DataBuf, sizeof(NVME_HEALTH_INFO_LOG))) {
+        FreeSptBuf4K(psptwb);
         return FALSE;
+    }
 
-    memcpy(&pInfo->nvmeHealth, sptwb.DataBuf, sizeof(NVME_HEALTH_INFO_LOG));
+    nCopy = sizeof(NVME_HEALTH_INFO_LOG);
+    if (nCopy > 512)
+        nCopy = 512;
+    memcpy(&pInfo->nvmeHealth, psptwb->DataBuf, nCopy);
     pInfo->bSMART_Supported = TRUE;
     pInfo->bIsNVMe = TRUE;
     pInfo->eAccessMethod = SMART_ACCESS_NVME_PASSTHROUGH;
+    FreeSptBuf4K(psptwb);
     return TRUE;
 }
 
@@ -3639,7 +4093,7 @@ static BOOL NVMeIdentifyVLI(HANDLE hDrive, DRIVE_INFO* pInfo)
         TrimStr(pInfo->szFirmware);
 
         pInfo->bGotNVMeIdent = TRUE;
-        memcpy(&pInfo->nvmeIdent, pIdentBuf, sizeof(NVME_IDENTIFY_CONTROLLER));
+        CopyNvmeIdentBuf(pInfo, pIdentBuf, 4096);
 
         pInfo->wNVMeWarnTempThreshold = ReadLE16(pInfo->nvmeIdent.WCTEMP);
         pInfo->wNVMeCritTempThreshold = ReadLE16(pInfo->nvmeIdent.CCTEMP);
@@ -3731,9 +4185,12 @@ static BOOL NVMeHealthLogVLI(HANDLE hDrive, DRIVE_INFO* pInfo)
  * ============================================================ */
 static BOOL NVMeOverUSBTryAll(HANDLE hDrive, DRIVE_INFO* pInfo)
 {
-    /* Try all known NVMe-over-USB bridge protocols in order.
-     * try each protocol and use the
-     * first one that returns valid data. */
+    /* Try known NVMe-over-USB bridge protocols. Never shotgun JMicron /
+     * ASMedia / VLI / native NvmeMini / 0xE4 at a known Realtek RTL9210.
+     * Realtek 0xE4 is a one-shot in ScanDrivesEx only. */
+
+    if (IsRealtekNvmeUsbBridge(pInfo))
+        return FALSE;
 
     /* 1. JMicron JMS583/586 */
     if (NVMeIdentifyJMicron(hDrive, pInfo)) {
@@ -3749,12 +4206,7 @@ static BOOL NVMeOverUSBTryAll(HANDLE hDrive, DRIVE_INFO* pInfo)
         }
     }
 
-    /* 3. Realtek RTL9210 */
-    if (NVMeIdentifyRealtek(hDrive, pInfo)) {
-        if (NVMeHealthLogRealtek(hDrive, pInfo)) {
-            return TRUE;
-        }
-    }
+    /* 3. Realtek RTL9210 — 0xE4 only from ScanDrivesEx, never here. */
 
     /* 4. VLI VL716/VL717 */
     if (NVMeIdentifyVLI(hDrive, pInfo)) {
@@ -3763,8 +4215,9 @@ static BOOL NVMeOverUSBTryAll(HANDLE hDrive, DRIVE_INFO* pInfo)
         }
     }
 
-    /* 5. Try native NVMe protocol query (works for some USB-C NVMe adapters
-     * that pass through the NVMe protocol, e.g. Thunderbolt NVMe) */
+    /* 5. Native NVMe protocol query. GetNVMeIdentifyController /
+     * GetNVMeHealthLogEx refuse USB (bus type 7), so this is a no-op
+     * on USB handles. Thunderbolt/internal NVMe is not USB. */
     if (GetNVMeIdentifyController(hDrive, pInfo)) {
         if (GetNVMeHealthLogEx(hDrive, pInfo)) {
             return TRUE;
@@ -3776,14 +4229,22 @@ static BOOL NVMeOverUSBTryAll(HANDLE hDrive, DRIVE_INFO* pInfo)
 BOOL RefreshDriveSmart(int nDriveIndex, DRIVE_INFO* pInfo)
 {
     HANDLE hDrive;
+    if (!pInfo) return FALSE;
+    if (IsLikelyUsbFlashDrive(pInfo)) return FALSE;
+    /* USB (incl. Realtek RTL9210): never IOCTL on the 30s timer.
+     * Keep the last full-scan snapshot. Native NvmeMini / vendor 0xE4
+     * on a USB handle crashes the process. */
+    if (pInfo->bIsUSB) return FALSE;
     if (!OpenDrive(nDriveIndex, &hDrive)) return FALSE;
 
     if (pInfo->bIsNVMe) {
+        /* Native NVMe only. Do not shotgun NVMeOverUSBTryAll here. */
         GetNVMeHealthLogEx(hDrive, pInfo);
         ExtractNVMeExtendedInfo(pInfo);
-        pInfo->nHealthPercent = CalculateHealthNVMe(pInfo);
+        pInfo->nHealthPercent = pInfo->bSMART_Supported
+            ? CalculateHealthNVMe(pInfo) : -1;
     } else if (pInfo->bSMART_Supported) {
-        AcquireATASMART(hDrive, nDriveIndex, pInfo);
+        AcquireATASMART(hDrive, nDriveIndex, pInfo, FALSE);
         pInfo->nHealthPercent = CalculateHealth(pInfo);
     }
     pInfo->nPerformancePercent = CalculatePerformance(pInfo);
@@ -3793,11 +4254,76 @@ BOOL RefreshDriveSmart(int nDriveIndex, DRIVE_INFO* pInfo)
     return TRUE;
 }
 
+
+/* Heuristic: consumer USB flash almost never exposes SMART. Known HDD/SSD
+ * enclosure bridges (RTL9210, JMicron, ASMedia, Realtek NVMe, …) are NOT flash. */
+static BOOL UsbBridgeLooksLikeEnclosure(const DRIVE_INFO* p)
+{
+    char hay[384];
+    if (!p) return FALSE;
+    switch (p->eUsbBridgeType) {
+    case USB_BRIDGE_NVME_JMICRON:
+    case USB_BRIDGE_NVME_ASMEDIA:
+    case USB_BRIDGE_NVME_REALTEK:
+    case USB_BRIDGE_NVME_VLI:
+    case USB_BRIDGE_NVME_FMA:
+    case USB_BRIDGE_ASM1352R:
+    case USB_BRIDGE_JMICRON:
+    case USB_BRIDGE_SUNPLUS:
+    case USB_BRIDGE_CYPRESS:
+    case USB_BRIDGE_IO_DATA:
+    case USB_BRIDGE_LOGITEC:
+    case USB_BRIDGE_PROLIFIC:
+        return TRUE;
+    default:
+        break;
+    }
+    _snprintf(hay, sizeof(hay), "%s %s %s",
+              p->szModel, p->szBridgeVendor, p->szBridgeProduct);
+    if (strstr(hay, "RTL9210") || strstr(hay, "RTL921") ||
+        strstr(hay, "Realtek") || strstr(hay, "REALTEK") ||
+        strstr(hay, "JMS") || strstr(hay, "JMicron") || strstr(hay, "JMICRON") ||
+        strstr(hay, "ASMedia") || strstr(hay, "ASMEDIA") ||
+        strstr(hay, "ASM1") || strstr(hay, "ASM2") ||
+        strstr(hay, "VL71") || strstr(hay, "VL716") || strstr(hay, "VL717"))
+        return TRUE;
+    return FALSE;
+}
+
+BOOL IsLikelyUsbFlashDrive(const DRIVE_INFO* p)
+{
+    char hay[384];
+    if (!p || !p->bIsUSB || p->bIsNVMe) return FALSE;
+    if (UsbBridgeLooksLikeEnclosure(p)) return FALSE;
+
+    _snprintf(hay, sizeof(hay), "%s %s %s",
+              p->szModel, p->szBridgeVendor, p->szBridgeProduct);
+    if (strstr(hay, "SanDisk") || strstr(hay, "SANDISK") ||
+        strstr(hay, "Kingston") || strstr(hay, "KINGSTON") ||
+        strstr(hay, "Transcend") || strstr(hay, "TRANSCEND") ||
+        strstr(hay, "Cruzer") || strstr(hay, "DataTraveler") ||
+        strstr(hay, "JetFlash") || strstr(hay, "Flash Drive") ||
+        strstr(hay, "USB DISK") || strstr(hay, "USB Flash") ||
+        strstr(hay, "3.2Gen") || strstr(hay, "Ultra Fit") ||
+        strstr(hay, "UFD") != NULL)
+        return TRUE;
+    return FALSE;
+}
+
 int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
+{
+    return ScanDrivesEx(pDrives, nMaxDrives, FALSE);
+}
+
+int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
 {
     int nFound = 0;
     int nDrive;
     const int nScanLimit = 32;
+
+    /* Never probe 4MB PhysicalDrive read/write — USB flash AVs/hangs. */
+    (void)bMeasureSpeed;
+    bMeasureSpeed = FALSE;
 
     for (nDrive = 0; nDrive < nScanLimit && nFound < nMaxDrives; nDrive++) {
         HANDLE hDrive;
@@ -3825,8 +4351,8 @@ int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
 
         BYTE busType = GetStorageBusType(hDrive);
 
-        /* --------------------- NVMe --------------------- */
-        if (IsNVMeDrive(hDrive)) {
+        /* --------------------- NVMe (not USB bridges) --------------------- */
+        if (IsNVMeDrive(hDrive) && busType != 7) {
             GetNVMeInfo(hDrive, pInfo);
 
             if (pInfo->szModel[0] == '\0') GetDeviceDescriptor(hDrive, pInfo);
@@ -3839,10 +4365,13 @@ int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
             pInfo->bIsNVMe             = TRUE;
             pInfo->eHealthStatus       = DetermineHealthStatus(pInfo);
             pInfo->eVendor             = DetectDriveVendor(pInfo->szModel);
+            FillDriveProtocol(pInfo);
 
             CloseHandle(hDrive);
-            pInfo->nReadSpeedMBs  = MeasureReadSpeed(nDrive);
-            pInfo->nWriteSpeedMBs = MeasureWriteSpeed(nDrive);
+            if (bMeasureSpeed) {
+                pInfo->nReadSpeedMBs  = MeasureReadSpeed(nDrive);
+                pInfo->nWriteSpeedMBs = MeasureWriteSpeed(nDrive);
+            }
             nFound++;
             continue;
         }
@@ -3856,9 +4385,12 @@ int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
             pInfo->nHealthPercent   = -1;
             pInfo->eHealthStatus    = HEALTH_STATUS_UNKNOWN;
             pInfo->eVendor          = DetectDriveVendor(pInfo->szModel);
+            FillDriveProtocol(pInfo);
             CloseHandle(hDrive);
-            pInfo->nReadSpeedMBs  = MeasureReadSpeed(nDrive);
-            pInfo->nWriteSpeedMBs = MeasureWriteSpeed(nDrive);
+            if (bMeasureSpeed) {
+                pInfo->nReadSpeedMBs  = MeasureReadSpeed(nDrive);
+                pInfo->nWriteSpeedMBs = MeasureWriteSpeed(nDrive);
+            }
             nFound++;
             continue;
         }
@@ -3872,7 +4404,7 @@ int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
         if (!bIdentOK && GetIdentifyData(hDrive, nDrive, pInfo)) bIdentOK = TRUE;
         if (!bIdentOK && GetIdentifyDataSAT(hDrive, pInfo)) {
             bIdentOK = TRUE;
-            pInfo->bIsUSB = TRUE;
+            if (busType == 7) pInfo->bIsUSB = TRUE;
         }
         if (!bIdentOK) {
             bIdentOK = GetIdentifyDataUSB(hDrive, pInfo);
@@ -3944,11 +4476,65 @@ int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
         }
 
         /* SMART data — multi-path acquisition */
-        if (pInfo->bIsUSB && !pInfo->bIsNVMe) {
+        /* Skip SAT / vendor NVMe-over-USB retries on likely USB flash.
+         * Still list the stick with model/capacity. Do not send Realtek 0xE4
+         * or SAT to SanDisk/Kingston UFD on every refresh. */
+        if (pInfo->bIsUSB && !pInfo->bIsNVMe && IsLikelyUsbFlashDrive(pInfo)) {
+            pInfo->bSMART_Supported = FALSE;
+        }
+        else if (pInfo->bIsUSB && !pInfo->bIsNVMe) {
             /* ---- USB drive SMART acquisition ---- */
             USB_BRIDGE_TYPE bridge = pInfo->eUsbBridgeType;
 
-            if (bridge == USB_BRIDGE_NVME_JMICRON) {
+            if (IsRealtekNvmeUsbBridge(pInfo) ||
+                bridge == USB_BRIDGE_NVME_REALTEK ||
+                bridge == USB_BRIDGE_NVME_FMA) {
+                /* RTL9210B dual-mode (SATA via SAT, NVMe via 0xE4).
+                 * SAT first: this enclosure often holds a SATA SSD;
+                 * 0xE4 on SATA is useless. One-shot 0xE4 only if SAT
+                 * SMART failed. Stay USB so RefreshDriveSmart never
+                 * native-IOCTLs it. Do NOT TryAll, GetNVMeHealthLogEx,
+                 * or IOCTL_STORAGE_PROTOCOL_COMMAND. */
+                BOOL got = FALSE;
+
+                /* 1) SATA behind RTL9210: AcquireATASMART is SAT-first on USB.
+                 *    Earlier GetIdentifyDataSAT may already have the model;
+                 *    still fetch SMART attributes. */
+                if (AcquireATASMART(hDrive, nDrive, pInfo, TRUE) &&
+                    pInfo->attrData.stAttributes[0].bAttrID != 0) {
+                    got = TRUE;
+                    pInfo->bSMART_Supported = TRUE;
+                    pInfo->bIsNVMe = FALSE;
+                    pInfo->bIsUSB = TRUE;
+                    pInfo->eType = DetectDriveType(hDrive, pInfo);
+                    pInfo->nHealthPercent = CalculateHealth(pInfo);
+                    pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
+                    /* ExtractTemperature/counters/SSD indicators:
+                     * already inside AcquireATASMART. */
+                }
+
+                /* 2) NVMe behind RTL9210: one-shot vendor 0xE4 */
+                if (!got) {
+                    if (NVMeIdentifyRealtek(hDrive, pInfo) &&
+                        NVMeHealthLogRealtek(hDrive, pInfo)) {
+                        ExtractNVMeExtendedInfo(pInfo);
+                        pInfo->bIsNVMe = TRUE;
+                        pInfo->bIsUSB = TRUE;
+                        pInfo->eType = DRIVE_TYPE_NVME;
+                        pInfo->bSMART_Supported = TRUE;
+                        pInfo->nHealthPercent = CalculateHealthNVMe(pInfo);
+                        pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
+                        got = TRUE;
+                    }
+                }
+
+                if (!got) {
+                    pInfo->bSMART_Supported = FALSE;
+                    pInfo->bIsNVMe = FALSE;
+                    pInfo->eType = DRIVE_TYPE_USB;
+                }
+            }
+            else if (bridge == USB_BRIDGE_NVME_JMICRON) {
                 /* NVMe via JMicron bridge (JMS583/586) */
                 if (NVMeIdentifyJMicron(hDrive, pInfo)) {
                     if (NVMeHealthLogJMicron(hDrive, pInfo)) {
@@ -3968,16 +4554,6 @@ int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
                     }
                 }
             }
-            else if (bridge == USB_BRIDGE_NVME_REALTEK || bridge == USB_BRIDGE_NVME_FMA) {
-                /* NVMe via Realtek/FMA bridge (RTL9210/NL6221) */
-                if (NVMeIdentifyRealtek(hDrive, pInfo)) {
-                    if (NVMeHealthLogRealtek(hDrive, pInfo)) {
-                        ExtractNVMeExtendedInfo(pInfo);
-                        pInfo->bIsNVMe = TRUE;
-                        pInfo->eType = DRIVE_TYPE_NVME;
-                    }
-                }
-            }
             else if (bridge == USB_BRIDGE_NVME_VLI) {
                 /* NVMe via VLI bridge (VL716/VL717) */
                 if (NVMeIdentifyVLI(hDrive, pInfo)) {
@@ -3989,11 +4565,16 @@ int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
                 }
             }
 
-            if (!pInfo->bIsNVMe && bridge != USB_BRIDGE_JMICRON &&
+            if (!pInfo->bIsNVMe &&
+                !IsRealtekNvmeUsbBridge(pInfo) &&
+                bridge != USB_BRIDGE_NVME_REALTEK &&
+                bridge != USB_BRIDGE_NVME_FMA &&
+                bridge != USB_BRIDGE_JMICRON &&
                 bridge != USB_BRIDGE_SUNPLUS && bridge != USB_BRIDGE_CYPRESS &&
                 bridge != USB_BRIDGE_IO_DATA && bridge != USB_BRIDGE_LOGITEC &&
                 bridge != USB_BRIDGE_PROLIFIC) {
-                /* Try generic NVMe-over-USB detection */
+                /* Try generic NVMe-over-USB detection.
+                 * Never shotgun vendor cmds at RTL9210. */
                 if (NVMeOverUSBTryAll(hDrive, pInfo)) {
                     ExtractNVMeExtendedInfo(pInfo);
                     pInfo->bIsNVMe = TRUE;
@@ -4001,10 +4582,15 @@ int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
                 }
             }
 
-            /* If not NVMe-over-USB, or NVMe detection failed, try SATA SMART via SAT */
-            if (!pInfo->bIsNVMe) {
+            /* If not NVMe-over-USB, or NVMe detection failed, try SATA SMART via SAT.
+             * Realtek RTL9210/FMA: SAT+0xE4 already handled above; no TryAll,
+             * GetNVMeHealthLogEx, or second AcquireATASMART. */
+            if (!pInfo->bIsNVMe &&
+                !IsRealtekNvmeUsbBridge(pInfo) &&
+                bridge != USB_BRIDGE_NVME_REALTEK &&
+                bridge != USB_BRIDGE_NVME_FMA) {
                 if (pInfo->bSMART_Supported) {
-                    AcquireATASMART(hDrive, nDrive, pInfo);
+                    AcquireATASMART(hDrive, nDrive, pInfo, TRUE);
                 } else {
                     /* Try SAT regardless of IDENTIFY's SMART supported bit */
                     if (GetSMARTAttributesSAT(hDrive, pInfo)) {
@@ -4021,7 +4607,8 @@ int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
                         ExtractCommonATACounters(pInfo);
                         ExtractSSDIndicators(pInfo);
                     } else if (GetNVMeHealthLogEx(hDrive, pInfo)) {
-                        /* Fallback: detect if this is actually NVMe via USB */
+                        /* Fallback: detect if this is actually NVMe via USB.
+                         * GetNVMeHealthLogEx already refuses bus type 7. */
                         pInfo->bIsNVMe = TRUE;
                         pInfo->eType   = DRIVE_TYPE_NVME;
                         ExtractNVMeExtendedInfo(pInfo);
@@ -4034,7 +4621,7 @@ int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
             }
         }
         else if (pInfo->bSMART_Supported) {
-            AcquireATASMART(hDrive, nDrive, pInfo);
+            AcquireATASMART(hDrive, nDrive, pInfo, TRUE);
         }
 
         if (pInfo->bIsNVMe) {
@@ -4045,10 +4632,13 @@ int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
         }
         pInfo->nPerformancePercent = CalculatePerformance(pInfo);
         pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
+        FillDriveProtocol(pInfo);
 
         CloseHandle(hDrive);
-        pInfo->nReadSpeedMBs  = MeasureReadSpeed(nDrive);
-        pInfo->nWriteSpeedMBs = MeasureWriteSpeed(nDrive);
+        if (bMeasureSpeed) {
+            pInfo->nReadSpeedMBs  = MeasureReadSpeed(nDrive);
+            pInfo->nWriteSpeedMBs = MeasureWriteSpeed(nDrive);
+        }
         nFound++;
     }
 
@@ -4070,96 +4660,12 @@ void FormatSize(DWORD dwMB, char* szBuf, int nBufLen)
 
 int MeasureReadSpeed(int nDriveIndex)
 {
-    char szPath[32];
-    _snprintf(szPath, sizeof(szPath), "\\\\.\\PhysicalDrive%d", nDriveIndex);
-
-    const DWORD dwBufSize = 4 * 1024 * 1024;
-    BYTE* pBuf = (BYTE*)VirtualAlloc(NULL, dwBufSize,
-                                     MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!pBuf) return -1;
-
-    LARGE_INTEGER liFreq, liStart, liEnd;
-    QueryPerformanceFrequency(&liFreq);
-
-    const int nPasses = 4;
-    DWORD dwTotalRead = 0;
-    QueryPerformanceCounter(&liStart);
-
-    int i;
-    for (i = 0; i < nPasses; i++) {
-        HANDLE hRaw = CreateFileA(szPath, GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-            FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-        if (hRaw == INVALID_HANDLE_VALUE) break;
-        DWORD dwRead = 0;
-        if (!ReadFile(hRaw, pBuf, dwBufSize, &dwRead, NULL) || dwRead == 0) {
-            CloseHandle(hRaw);
-            break;
-        }
-        dwTotalRead += dwRead;
-        CloseHandle(hRaw);
-    }
-
-    QueryPerformanceCounter(&liEnd);
-    VirtualFree(pBuf, 0, MEM_RELEASE);
-    if (dwTotalRead == 0) return -1;
-
-    double dElapsed = (double)(liEnd.QuadPart - liStart.QuadPart) / (double)liFreq.QuadPart;
-    if (dElapsed <= 0.0) return -1;
-    return (int)((double)dwTotalRead / (1024.0 * 1024.0) / dElapsed);
+    (void)nDriveIndex;
+    return -1;
 }
 
 int MeasureWriteSpeed(int nDriveIndex)
 {
     (void)nDriveIndex;
-    char szTempDir[MAX_PATH];
-    char szTempFile[MAX_PATH];
-
-    if (!GetTempPathA(MAX_PATH, szTempDir)) return -1;
-    if (!GetTempFileNameA(szTempDir, "LHD", 0, szTempFile)) return -1;
-
-    const DWORD dwBufSize = 4 * 1024 * 1024;
-    const int   nPasses   = 4;
-
-    BYTE* pBuf = (BYTE*)VirtualAlloc(NULL, dwBufSize,
-                                     MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!pBuf) {
-        DeleteFileA(szTempFile);
-        return -1;
-    }
-    DWORD di;
-    for (di = 0; di < dwBufSize; di++) pBuf[di] = (BYTE)(di & 0xFF);
-
-    HANDLE hFile = CreateFileA(szTempFile, GENERIC_WRITE, 0, NULL,
-        CREATE_ALWAYS,
-        FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_SEQUENTIAL_SCAN,
-        NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        VirtualFree(pBuf, 0, MEM_RELEASE);
-        DeleteFileA(szTempFile);
-        return -1;
-    }
-
-    LARGE_INTEGER liFreq, liStart, liEnd;
-    QueryPerformanceFrequency(&liFreq);
-    DWORD dwTotalWritten = 0;
-    QueryPerformanceCounter(&liStart);
-
-    int i;
-    for (i = 0; i < nPasses; i++) {
-        DWORD dwWritten = 0;
-        if (!WriteFile(hFile, pBuf, dwBufSize, &dwWritten, NULL) || dwWritten == 0)
-            break;
-        dwTotalWritten += dwWritten;
-    }
-    QueryPerformanceCounter(&liEnd);
-
-    CloseHandle(hFile);
-    VirtualFree(pBuf, 0, MEM_RELEASE);
-    DeleteFileA(szTempFile);
-
-    if (dwTotalWritten == 0 || liFreq.QuadPart == 0) return -1;
-    double dElapsed = (double)(liEnd.QuadPart - liStart.QuadPart) / (double)liFreq.QuadPart;
-    if (dElapsed <= 0.0) return -1;
-    return (int)((double)dwTotalWritten / (1024.0 * 1024.0) / dElapsed);
+    return -1;
 }

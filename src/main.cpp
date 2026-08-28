@@ -32,11 +32,14 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <commctrl.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "mainwnd.h"
 #include "smart.h"
 #include "resource.h"
-#include "donate.h"    
+#include "donate.h"
+#include "utf8ui.h"
 
 /* A globally-named mutex prevents the user from accidentally launching
    multiple instances of the monitor.  The "Global\" prefix makes the
@@ -90,9 +93,46 @@ static void BringExistingWindowToFront(void)
 /*  WinMain - program entry point                                     */
 /* ------------------------------------------------------------------ */
 
+/* Tiny crash log: no MessageBox (can deadlock in a crash). Writes
+   %TEMP%\HDDHealthMonitor_crash.txt, else next to the exe. */
+static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
+{
+    char dir[MAX_PATH];
+    char path[MAX_PATH + 64];
+    FILE* f = NULL;
+    DWORD n = GetTempPathA(MAX_PATH, dir);
+    if (n && n < MAX_PATH) {
+        _snprintf(path, sizeof(path), "%sHDDHealthMonitor_crash.txt", dir);
+        f = fopen(path, "w");
+    }
+    if (!f && GetModuleFileNameA(NULL, dir, MAX_PATH)) {
+        char* slash = strrchr(dir, '\\');
+        if (!slash) slash = strrchr(dir, '/');
+        if (slash) {
+            slash[1] = '\0';
+            _snprintf(path, sizeof(path), "%sHDDHealthMonitor_crash.txt", dir);
+            f = fopen(path, "w");
+        }
+    }
+    if (f) {
+        DWORD code = 0;
+        void* addr = NULL;
+        if (ep && ep->ExceptionRecord) {
+            code = ep->ExceptionRecord->ExceptionCode;
+            addr = ep->ExceptionRecord->ExceptionAddress;
+        }
+        fprintf(f, "exception=0x%08lX\naddress=%p\nthread=%lu\n",
+                (unsigned long)code, addr, (unsigned long)GetCurrentThreadId());
+        fclose(f);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow)
 {
+    SetUnhandledExceptionFilter(CrashFilter);
+
     /* ---- Single-instance guard ------------------------------------ */
     HANDLE hMutex = CreateWorldMutex();
     if (hMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -144,20 +184,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     HMENU hMenuBar  = CreateMenu();
     HMENU hMenuFile = CreatePopupMenu();
     HMENU hMenuHelp = CreatePopupMenu();
-    AppendMenuA(hMenuFile, MF_STRING,    IDM_SHOW_WINDOW, "&Show Window");
-    AppendMenuA(hMenuFile, MF_SEPARATOR, 0,               NULL);
-    AppendMenuA(hMenuFile, MF_STRING,    IDM_EXIT,        "E&xit");
-    AppendMenuA(hMenuHelp, MF_STRING,    IDM_DONATE,      "&Donate...");
-    AppendMenuA(hMenuHelp, MF_SEPARATOR, 0,               NULL);
-    AppendMenuA(hMenuHelp, MF_STRING,    IDM_ABOUT,       "&About HDDHealth...");
-    AppendMenuA(hMenuBar,  MF_POPUP, (UINT_PTR)hMenuFile, "&File");
-    AppendMenuA(hMenuBar,  MF_POPUP, (UINT_PTR)hMenuHelp, "&Help");
+    AppendMenuU8(hMenuFile, MF_STRING,    IDM_SHOW_WINDOW, "&Показать окно");
+    AppendMenuU8(hMenuFile, MF_SEPARATOR, 0,               NULL);
+    AppendMenuU8(hMenuFile, MF_STRING,    IDM_EXIT,        "В&ыход");
+    AppendMenuU8(hMenuHelp, MF_STRING,    IDM_DONATE,      "&Поддержать...");
+    AppendMenuU8(hMenuHelp, MF_SEPARATOR, 0,               NULL);
+    AppendMenuU8(hMenuHelp, MF_STRING,    IDM_ABOUT,       "&О программе...");
+    AppendMenuU8(hMenuBar,  MF_POPUP, (UINT_PTR)hMenuFile, "&Файл");
+    AppendMenuU8(hMenuBar,  MF_POPUP, (UINT_PTR)hMenuHelp, "&Справка");
 
     HWND hWnd = CreateWindowExA(
         0,
         "LLHDMonitorMainWnd",
         "HDDHealth Monitor 1.1",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        WS_OVERLAPPEDWINDOW,
         nX, nY, WINDOW_W, WINDOW_H,
         NULL, hMenuBar, hInstance, NULL
     );

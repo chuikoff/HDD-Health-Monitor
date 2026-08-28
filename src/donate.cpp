@@ -63,7 +63,7 @@ static LRESULT CALLBACK DonateDlgProc(HWND hDlg, UINT uMsg,
 
             /* Bold title font used only inside this dialog. */
             HFONT hFontBold = CreateFontA(-15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
 
             /* ---- Header ------------------------------------------------- */
@@ -111,7 +111,7 @@ static LRESULT CALLBACK DonateDlgProc(HWND hDlg, UINT uMsg,
             /* Underlined "link-style" font for the URL static. */
             HFONT hFontLink = CreateFontA(-12, 0, 0, 0, FW_NORMAL,
                 FALSE, TRUE, FALSE,
-                ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
             SendMessageA(hLink, WM_SETFONT, (WPARAM)hFontLink, TRUE);
 
