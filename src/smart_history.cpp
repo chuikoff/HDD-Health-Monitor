@@ -30,6 +30,7 @@
 #include <time.h>
 #include "smart_history.h"
 #include "mainwnd.h"
+#include "safestr.h"
 
 const BYTE g_HistoryAttrIDs[HISTORY_TRACKED_ATTRS] = {
     0xC2,
@@ -154,9 +155,9 @@ static BOOL GetHistoryPath(char* szOut, int nLen)
     char szAppData[MAX_PATH];
     if (!SHGetSpecialFolderPathA(NULL, szAppData, CSIDL_APPDATA, TRUE))
         return FALSE;
-    _snprintf(szOut, nLen, "%s\\HDDH", szAppData);
+    safe_snprintf_n(szOut, nLen, "%s\\HDDH", szAppData);
     CreateDirectoryA(szOut, NULL);
-    _snprintf(szOut, nLen, "%s\\HDDH\\history.dat", szAppData);
+    safe_snprintf_n(szOut, nLen, "%s\\HDDH\\history.dat", szAppData);
     return TRUE;
 }
 
@@ -344,7 +345,7 @@ void Graph_Paint(HDC hdc, const RECT* prc,
     char szNum[32];
     for (gi = 0; gi <= 5; gi++) {
         DWORD v = valMin + (DWORD)((double)(valMax - valMin) * (5 - gi) / 5.0);
-        _snprintf(szNum, sizeof(szNum), "%lu", (unsigned long)v);
+        safe_snprintf(szNum, "%lu", (unsigned long)v);
         int y = prc->top + mT + gH * gi / 5 - 6;
         RECT rcLbl = { prc->left, y, prc->left + mL - 4, y + 14 };
         DrawTextA(hdc, szNum, -1, &rcLbl, DT_RIGHT | DT_SINGLELINE);
@@ -352,7 +353,7 @@ void Graph_Paint(HDC hdc, const RECT* prc,
 
     {
         char szX0[8] = "-N";
-        _snprintf(szX0, sizeof(szX0), "-%d", n);
+        safe_snprintf(szX0, "-%d", n);
         int yLbl = prc->top + mT + gH + 2;
         RECT rc0 = { prc->left + mL - 10, yLbl, prc->left + mL + 30, yLbl + 14 };
         DrawTextA(hdc, szX0, -1, &rc0, DT_LEFT | DT_SINGLELINE);
@@ -395,9 +396,9 @@ void Graph_Paint(HDC hdc, const RECT* prc,
     if (n > 0) {
         char szCur[48];
         if (nAttrIdx < 0)
-            _snprintf(szCur, sizeof(szCur), "Current: %d%%", pHist->aSamples[(pHist->nWriteHead + HISTORY_MAX_SAMPLES - 1) % HISTORY_MAX_SAMPLES].nHealthPercent);
+            safe_snprintf(szCur, "Current: %d%%", pHist->aSamples[(pHist->nWriteHead + HISTORY_MAX_SAMPLES - 1) % HISTORY_MAX_SAMPLES].nHealthPercent);
         else
-            _snprintf(szCur, sizeof(szCur), "Current: %lu",
+            safe_snprintf(szCur, "Current: %lu",
                       (unsigned long)pHist->aSamples[(pHist->nWriteHead + HISTORY_MAX_SAMPLES - 1) % HISTORY_MAX_SAMPLES].dwAttrRaw[nAttrIdx]);
 
         SelectObject(hdc, hFontSmall);
@@ -543,7 +544,7 @@ static LRESULT CALLBACK GraphWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
                 if (g_nGraphDrive >= 0 && g_nGraphDrive < g_nDriveCount) {
                     if (MessageBoxA(hWnd,
                         "Clear all recorded history for this drive?",
-                        "HDDHealth Monitor", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                        "DriveMonitor", MB_YESNO | MB_ICONQUESTION) == IDYES) {
                         History_Clear(g_Drives[g_nGraphDrive].szSerial);
                         InvalidateRect(hWnd, NULL, TRUE);
                     }
@@ -655,7 +656,7 @@ void Graph_ShowWindow(HWND hParent, HINSTANCE hInst, int nDriveIdx)
 
         if (nDriveIdx >= 0 && nDriveIdx < g_nDriveCount) {
             char szTitle[128];
-            _snprintf(szTitle, sizeof(szTitle),
+            safe_snprintf(szTitle,
                       "S.M.A.R.T. History > %s", g_Drives[nDriveIdx].szModel);
             SetWindowTextA(g_hGraphWnd, szTitle);
         }
@@ -663,7 +664,7 @@ void Graph_ShowWindow(HWND hParent, HINSTANCE hInst, int nDriveIdx)
 
         if (nDriveIdx >= 0 && nDriveIdx < g_nDriveCount) {
             char szTitle[128];
-            _snprintf(szTitle, sizeof(szTitle),
+            safe_snprintf(szTitle,
                       "S.M.A.R.T. History > %s", g_Drives[nDriveIdx].szModel);
             SetWindowTextA(g_hGraphWnd, szTitle);
         }

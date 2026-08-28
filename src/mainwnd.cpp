@@ -12,9 +12,7 @@
  *    - Drive-selection buttons (custom owner-drawn buttons)
  *    - Health / Performance custom progress bars
  *    - S.M.A.R.T. attribute list view
- *    - Tray icon management with per-drive sub-icons
  *    - Device arrival / removal (hot-plug) handling
- *    - Temperature / health / failure critical alerts
  *    - About dialog
  *    - Save-screenshot feature (PNG via GDI+)
  *
@@ -22,7 +20,13 @@
  */
 
 #define WIN32_LEAN_AND_MEAN
+#ifndef UNICODE
+#define UNICODE
+#define _UNICODE
+#endif
 #include <windows.h>
+#include <wingdi.h>
+#include <dwmapi.h>
 #include <commctrl.h>
 #include <shellapi.h>
 #include <dbt.h>
@@ -47,6 +51,7 @@ using namespace Gdiplus;
 #include "smart.h"
 #include "donate.h"    
 #include "utf8ui.h"
+#include "safestr.h"
 
 static unsigned __int64 NVMeRead128Lo(const BYTE* p)
 {
@@ -68,9 +73,9 @@ static void FormatNvmeHostBytes(unsigned __int64 units, char* szBuf, int nBufLen
     double bytes = (double)units * 512000.0;
     double tb = bytes / 1e12;
     if (tb >= 1.0)
-        _snprintf(szBuf, nBufLen, "%.1f ТБ", tb);
+        safe_snprintf_n(szBuf, nBufLen, "%.1f ТБ", tb);
     else
-        _snprintf(szBuf, nBufLen, "%.1f ГБ", bytes / 1e9);
+        safe_snprintf_n(szBuf, nBufLen, "%.1f ГБ", bytes / 1e9);
 }
 
 /* USB enclosure/chip name from SCSI INQUIRY; type name / VID:PID fallback.
@@ -81,33 +86,40 @@ static void FormatAtaWrites(int nGiB, char* szBuf, int nBufLen)
 {
     if (nGiB < 0) { szBuf[0] = '\0'; return; }
     if (nGiB >= 1024)
-        _snprintf(szBuf, nBufLen, "%.1f ТБ", (double)nGiB / 1024.0);
+        safe_snprintf_n(szBuf, nBufLen, "%.1f ТБ", (double)nGiB / 1024.0);
     else
-        _snprintf(szBuf, nBufLen, "%d ГБ", nGiB);
+        safe_snprintf_n(szBuf, nBufLen, "%d ГБ", nGiB);
 }
 
-/* Crystal-style headline from ATA SMART (A9/E7 life left, E9/F9 NAND writes).
- * Износ = 100 − остаток ресурса, как Percentage Used у NVMe. */
-static BOOL FormatAtaSsdSmartLine(const DRIVE_INFO* pInfo, char* szBuf, int nBufLen)
+/* Unified SMART headline for every drive type:
+ *   Запас …  ·  Износ …  ·  Записано …
+ * Missing values are an em dash; fields are never omitted. */
+static void FormatSmartHeadline(const DRIVE_INFO* pInfo, char* szBuf, int nBufLen)
 {
-    char szTbw[32];
-    int nWear;
-    if (!pInfo || nBufLen <= 0) return FALSE;
+    char szSpare[32], szWear[32], szWritten[32];
+    if (!pInfo || nBufLen <= 0) return;
     szBuf[0] = '\0';
-    if (pInfo->nSSDLifeLeft < 0 && pInfo->nSSDTotalWritesGB < 0)
-        return FALSE;
-    if (pInfo->nSSDTotalWritesGB >= 0)
-        FormatAtaWrites(pInfo->nSSDTotalWritesGB, szTbw, sizeof(szTbw));
-    else
-        _snprintf(szTbw, sizeof(szTbw), "н/д");
-    if (pInfo->nSSDLifeLeft >= 0 && pInfo->nSSDLifeLeft <= 100) {
-        nWear = 100 - pInfo->nSSDLifeLeft;
-        _snprintf(szBuf, nBufLen, "Ресурс %d%%  ·  Износ %d%%  ·  Записано %s",
-                  pInfo->nSSDLifeLeft, nWear, szTbw);
-        return TRUE;
+    lstrcpynA(szSpare, "—", sizeof(szSpare));
+    lstrcpynA(szWear, "—", sizeof(szWear));
+    lstrcpynA(szWritten, "—", sizeof(szWritten));
+
+    if (pInfo->bIsNVMe && pInfo->bSMART_Supported) {
+        safe_snprintf(szSpare, "%d%%",
+                  (int)pInfo->nvmeHealth.AvailableSpare);
+        safe_snprintf(szWear, "%d%%",
+                  (int)pInfo->nvmeHealth.PercentageUsed);
+        FormatNvmeHostBytes(NVMeRead128Lo(pInfo->nvmeHealth.DataUnitsWritten),
+                            szWritten, sizeof(szWritten));
+    } else if (pInfo->bSMART_Supported) {
+        /* ATA SSD: no spare-like field is extracted, so Запас stays —. */
+        if (pInfo->nSSDLifeLeft >= 0 && pInfo->nSSDLifeLeft <= 100)
+            safe_snprintf(szWear, "%d%%", 100 - pInfo->nSSDLifeLeft);
+        if (pInfo->nSSDTotalWritesGB >= 0)
+            FormatAtaWrites(pInfo->nSSDTotalWritesGB, szWritten, sizeof(szWritten));
     }
-    _snprintf(szBuf, nBufLen, "Записано %s", szTbw);
-    return TRUE;
+
+    safe_snprintf_n(szBuf, nBufLen, "Запас %s  ·  Износ %s  ·  Записано %s",
+              szSpare, szWear, szWritten);
 }
 
 static void FormatUsbAdapterName(const DRIVE_INFO* p, char* szBuf, int nBufLen)
@@ -130,9 +142,9 @@ static void FormatUsbAdapterName(const DRIVE_INFO* p, char* szBuf, int nBufLen)
                 strstr(pr, "Realtek") || strstr(pr, "ASMedia") ||
                 strstr(pr, "JMicron")) {
                 if (p->szBridgeVendor[0])
-                    _snprintf(szBuf, nBufLen, "%s %s", p->szBridgeVendor, pr);
+                    safe_snprintf_n(szBuf, nBufLen, "%s %s", p->szBridgeVendor, pr);
                 else
-                    _snprintf(szBuf, nBufLen, "%s", pr);
+                    safe_snprintf_n(szBuf, nBufLen, "%s", pr);
                 return;
             }
         }
@@ -140,22 +152,22 @@ static void FormatUsbAdapterName(const DRIVE_INFO* p, char* szBuf, int nBufLen)
 
     if (p->wUsbVid == 0x0BDA) {
         if (p->wUsbPid == 0x9210 || p->wUsbPid == 0x9211)
-            _snprintf(szBuf, nBufLen, "Realtek RTL9210 (%04X:%04X)",
+            safe_snprintf_n(szBuf, nBufLen, "Realtek RTL9210 (%04X:%04X)",
                       (unsigned)p->wUsbVid, (unsigned)p->wUsbPid);
         else if (p->wUsbPid)
-            _snprintf(szBuf, nBufLen, "Realtek (%04X:%04X)",
+            safe_snprintf_n(szBuf, nBufLen, "Realtek (%04X:%04X)",
                       (unsigned)p->wUsbVid, (unsigned)p->wUsbPid);
         else
-            _snprintf(szBuf, nBufLen, "Realtek");
+            safe_snprintf_n(szBuf, nBufLen, "Realtek");
         return;
     }
     if (p->wUsbVid == 0x152D) {
-        _snprintf(szBuf, nBufLen, "JMicron (%04X:%04X)",
+        safe_snprintf_n(szBuf, nBufLen, "JMicron (%04X:%04X)",
                   (unsigned)p->wUsbVid, (unsigned)p->wUsbPid);
         return;
     }
     if (p->wUsbVid == 0x174C) {
-        _snprintf(szBuf, nBufLen, "ASMedia (%04X:%04X)",
+        safe_snprintf_n(szBuf, nBufLen, "ASMedia (%04X:%04X)",
                   (unsigned)p->wUsbVid, (unsigned)p->wUsbPid);
         return;
     }
@@ -178,17 +190,17 @@ static void FormatUsbAdapterName(const DRIVE_INFO* p, char* szBuf, int nBufLen)
     }
 
     if (chip && p->wUsbVid && p->wUsbPid)
-        _snprintf(szBuf, nBufLen, "%s (%04X:%04X)", chip,
+        safe_snprintf_n(szBuf, nBufLen, "%s (%04X:%04X)", chip,
                   (unsigned)p->wUsbVid, (unsigned)p->wUsbPid);
     else if (chip)
-        _snprintf(szBuf, nBufLen, "%s", chip);
+        safe_snprintf_n(szBuf, nBufLen, "%s", chip);
     else if (p->szBridgeVendor[0])
-        _snprintf(szBuf, nBufLen, "%s", p->szBridgeVendor);
+        safe_snprintf_n(szBuf, nBufLen, "%s", p->szBridgeVendor);
     else if (p->wUsbVid && p->wUsbPid)
-        _snprintf(szBuf, nBufLen, "VID:%04X PID:%04X",
+        safe_snprintf_n(szBuf, nBufLen, "VID:%04X PID:%04X",
                   (unsigned)p->wUsbVid, (unsigned)p->wUsbPid);
     else
-        _snprintf(szBuf, nBufLen, "—");
+        safe_snprintf_n(szBuf, nBufLen, "—");
 }
 
 DRIVE_INFO  g_Drives[MAX_DRIVES];
@@ -200,43 +212,34 @@ HWND        g_hHealthBar     = NULL;
 HWND        g_hPerfBar       = NULL;
 HWND        g_hDriveBtn[MAX_DRIVES];
 
-static NOTIFYICONDATAA g_nid[MAX_DRIVES];
-static BOOL            g_bTraySlot[MAX_DRIVES];
-static int             g_nTrayCount    = 0;
-static BOOL            g_bMinToTray    = FALSE;
-
 static HDEVNOTIFY      g_hDevNotify    = NULL;
 static DRIVE_INFO      g_PrevDrives[MAX_DRIVES];
 static int             g_nPrevCount    = 0;
 #define HOTPLUG_DELAY_MS  1200
-
-#define ALERT_TEMP_WARN_C       55
-#define ALERT_TEMP_CRITICAL_C   65
-#define ALERT_HEALTH_WARN       40
-#define ALERT_HEALTH_CRITICAL   20
-
-typedef struct {
-    BOOL bTempWarnSent;
-    BOOL bTempCritSent;
-    BOOL bHealthWarnSent;
-    BOOL bHealthCritSent;
-    BOOL bFailurePredSent;
-    BOOL bNVMeCritWarnSent;
-    BOOL bReallocSent;
-    BOOL bUncorrectSent;
-} DRIVE_ALERT_STATE;
-
-static DRIVE_ALERT_STATE g_AlertState[MAX_DRIVES];
-static BOOL g_bAlertStateInit = FALSE;
 
 /* Note: the previous WinRAR-style nag timer state variables
    (g_nagSecondsLeft, g_bNagPending) have been removed because the
    program is 100% free and open source
    reminder to show anymore. */
 
+static void ApplyGlassFrame(HWND hWnd)
+{
+    DWORD pref = DWMWCP_ROUND;
+    DwmSetWindowAttribute(hWnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
+
+    DWORD backdrop = DWMSBT_MAINWINDOW; /* Mica; fails quietly on Win10 */
+    DwmSetWindowAttribute(hWnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
+
+    COLORREF clrBorder = RGB(210, 222, 238);
+    DwmSetWindowAttribute(hWnd, DWMWA_BORDER_COLOR, &clrBorder, sizeof(clrBorder));
+
+    COLORREF clrCaption = RGB(236, 242, 252);
+    DwmSetWindowAttribute(hWnd, DWMWA_CAPTION_COLOR, &clrCaption, sizeof(clrCaption));
+}
+
 static void UpdateWindowTitle(HWND hWnd)
 {
-    SetWindowTextA(hWnd, "HDDHealth Monitor 1.1");
+    SetWindowTextU8(hWnd, "DriveMonitor");
 }
 
 HBRUSH  g_hbrBG     = NULL;
@@ -248,8 +251,6 @@ HFONT   g_hFontTitle  = NULL;
 HFONT   g_hFontNormal = NULL;
 HFONT   g_hFontSmall  = NULL;
 HFONT   g_hFontBig    = NULL;
-
-static WNDPROC g_wpOrigBtn = NULL;
 
 void CreateGDIObjects(void)
 {
@@ -271,93 +272,6 @@ void CreateGDIObjects(void)
     g_hFontBig    = CreateFontA(-32, 0, 0, 0, FW_BOLD,   FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                 DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-}
-
-static HICON BuildHealthIcon(int nHealth)
-{
-    const int SZ = 16;
-    COLORREF clrBg;
-    if      (nHealth < 0)   clrBg = RGB(30, 100, 210);
-    else if (nHealth >= 70) clrBg = RGB(30, 150,  60);
-    else if (nHealth >= 40) clrBg = RGB(180,120,   0);
-    else                    clrBg = RGB(190,  30,  30);
-
-    HDC hdcScreen = GetDC(NULL);
-    HDC hdcColor  = CreateCompatibleDC(hdcScreen);
-    HDC hdcMask   = CreateCompatibleDC(hdcScreen);
-
-    HBITMAP hbmColor = CreateCompatibleBitmap(hdcScreen, SZ, SZ);
-    HBITMAP hbmMask  = CreateBitmap(SZ, SZ, 1, 1, NULL);
-
-    HBITMAP hbmOldColor = (HBITMAP)SelectObject(hdcColor, hbmColor);
-    HBITMAP hbmOldMask  = (HBITMAP)SelectObject(hdcMask,  hbmMask);
-
-    HBRUSH hbrBg = CreateSolidBrush(clrBg);
-    RECT rc = { 0, 0, SZ, SZ };
-    FillRect(hdcColor, &rc, hbrBg);
-    DeleteObject(hbrBg);
-
-    char szText[8];
-    if (nHealth < 0)
-        lstrcpyA(szText, "--");
-    else
-        _snprintf(szText, sizeof(szText), "%d", nHealth);
-
-    HFONT hFont = CreateFontA(-9, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                               CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
-                               DEFAULT_PITCH | FF_DONTCARE, "Arial");
-    HFONT hOldFont = (HFONT)SelectObject(hdcColor, hFont);
-    SetBkMode(hdcColor, TRANSPARENT);
-    SetTextColor(hdcColor, RGB(255, 255, 255));
-
-    int len = (int)strlen(szText);
-    SIZE sz;
-    GetTextExtentPoint32A(hdcColor, szText, len, &sz);
-    int x = (SZ - sz.cx) / 2;
-    int y = (SZ - sz.cy) / 2;
-    TextOutA(hdcColor, x, y, szText, len);
-
-    SelectObject(hdcColor, hOldFont);
-    DeleteObject(hFont);
-
-    PatBlt(hdcMask, 0, 0, SZ, SZ, BLACKNESS);
-
-    SelectObject(hdcColor, hbmOldColor);
-    SelectObject(hdcMask,  hbmOldMask);
-
-    DeleteDC(hdcColor);
-    DeleteDC(hdcMask);
-    ReleaseDC(NULL, hdcScreen);
-
-    ICONINFO ii;
-    ii.fIcon    = TRUE;
-    ii.xHotspot = 0;
-    ii.yHotspot = 0;
-    ii.hbmColor = hbmColor;
-    ii.hbmMask  = hbmMask;
-    HICON hIcon = CreateIconIndirect(&ii);
-
-    DeleteObject(hbmColor);
-    DeleteObject(hbmMask);
-    return hIcon;
-}
-
-static void TrayBalloon(const char* szTitle, const char* szMsg, DWORD niif)
-{
-    if (!g_bTraySlot[0]) return;
-
-    NOTIFYICONDATAA nid;
-    ZeroMemory(&nid, sizeof(nid));
-    nid.cbSize      = sizeof(NOTIFYICONDATAA);
-    nid.hWnd        = g_nid[0].hWnd;
-    nid.uID         = g_nid[0].uID;
-    nid.uFlags      = NIF_INFO;
-    nid.dwInfoFlags = niif;
-    nid.uTimeout    = 4000;
-    lstrcpynA(nid.szInfoTitle, szTitle, sizeof(nid.szInfoTitle) - 1);
-    lstrcpynA(nid.szInfo,      szMsg,   sizeof(nid.szInfo)      - 1);
-    Shell_NotifyIconA(NIM_MODIFY, &nid);
 }
 
 static ULONG_PTR g_gdiplusToken = 0;
@@ -395,13 +309,13 @@ static BOOL SaveScreenshotPNG(HWND hWnd, char* szPathOut, int nPathMax,
         if (p) *p = '\0';
     }
     char szOutDir[MAX_PATH];
-    _snprintf(szOutDir, sizeof(szOutDir), "%s\\HDDH_Screenshots", szDocDir);
+    safe_snprintf(szOutDir, "%s\\HDDH_Screenshots", szDocDir);
     CreateDirectoryA(szOutDir, NULL);
 
     SYSTEMTIME st;
     GetLocalTime(&st);
     char szFile[MAX_PATH];
-    _snprintf(szFile, sizeof(szFile),
+    safe_snprintf(szFile,
         "%s\\HDDH_%04d%02d%02d_%02d%02d%02d.png",
         szOutDir,
         st.wYear, st.wMonth, st.wDay,
@@ -446,7 +360,7 @@ static BOOL SaveScreenshotPNG(HWND hWnd, char* szPathOut, int nPathMax,
             Status st2 = pBmp->Save(wszFile, &clsidPng, NULL);
             bOK = (st2 == Ok);
             if (!bOK && szErrOut)
-                _snprintf(szErrOut, nErrMax,
+                safe_snprintf_n(szErrOut, nErrMax,
                     "GDI+ Save failed (status %d).", (int)st2);
         } else {
             if (szErrOut) lstrcpynA(szErrOut, "PNG encoder not found.", nErrMax);
@@ -465,20 +379,20 @@ static void DoSaveScreenshot(HWND hWnd)
     char szErr[256]       = "";
     if (SaveScreenshotPNG(hWnd, szPath, MAX_PATH, szErr, sizeof(szErr))) {
         char szMsg[MAX_PATH + 128];
-        _snprintf(szMsg, sizeof(szMsg),
+        safe_snprintf(szMsg,
             "Screenshot saved successfully!\n\n%s\n\nOpen folder now?", szPath);
-        int nRet = MessageBoxA(hWnd, szMsg, "HDDHealth Monitor - Screenshot Saved",
+        int nRet = MessageBoxU8(hWnd, szMsg, "DriveMonitor - Screenshot Saved",
                                MB_YESNO | MB_ICONINFORMATION);
         if (nRet == IDYES) {
 
             char szCmd[MAX_PATH + 32];
-            _snprintf(szCmd, sizeof(szCmd), "/select,\"%s\"", szPath);
+            safe_snprintf(szCmd, "/select,\"%s\"", szPath);
             ShellExecuteA(NULL, "open", "explorer.exe", szCmd, NULL, SW_SHOWNORMAL);
         }
     } else {
         char szMsg[320];
-        _snprintf(szMsg, sizeof(szMsg), "Screenshot failed:\n%s", szErr);
-        MessageBoxA(hWnd, szMsg, "HDDHealth Monitor - Screenshot Error", MB_OK | MB_ICONERROR);
+        safe_snprintf(szMsg, "Screenshot failed:\n%s", szErr);
+        MessageBoxU8(hWnd, szMsg, "DriveMonitor - Screenshot Error", MB_OK | MB_ICONERROR);
     }
 }
 
@@ -488,144 +402,6 @@ static void Snapshot_Save(void)
     g_nPrevCount = g_nDriveCount;
     for (i = 0; i < g_nDriveCount; i++)
         g_PrevDrives[i] = g_Drives[i];
-}
-
-static const char* DriveName(DRIVE_INFO* pD)
-{
-    return (strlen(pD->szModel) > 0) ? pD->szModel : "Unknown Drive";
-}
-
-static void CheckCriticalAlerts(void)
-{
-    int i;
-
-    if (!g_bAlertStateInit) {
-        ZeroMemory(g_AlertState, sizeof(g_AlertState));
-        g_bAlertStateInit = TRUE;
-    }
-
-    for (i = 0; i < g_nDriveCount && i < MAX_DRIVES; i++) {
-        DRIVE_INFO*       pD = &g_Drives[i];
-        DRIVE_ALERT_STATE* pA = &g_AlertState[i];
-        char szTitle[64], szMsg[256];
-
-        if (i < g_nPrevCount) {
-            BOOL bSameSerial = (strlen(pD->szSerial) > 0 &&
-                                strcmp(pD->szSerial, g_PrevDrives[i].szSerial) == 0);
-            BOOL bSameModel  = (strlen(pD->szModel) > 0 &&
-                                strcmp(pD->szModel,  g_PrevDrives[i].szModel)  == 0);
-            if (!bSameSerial && !bSameModel)
-                ZeroMemory(pA, sizeof(*pA));
-        }
-
-        if (!pD->bSMART_Supported) continue;
-
-        if (pD->nTemperatureC > 0) {
-            if (pD->nTemperatureC >= ALERT_TEMP_CRITICAL_C && !pA->bTempCritSent) {
-                lstrcpyA(szTitle, "!! CRITICAL: Drive Overheating !!");
-                _snprintf(szMsg, sizeof(szMsg),
-                    "%s\nTemperature: %d\xC2\xB0""C (critical threshold: %d\xC2\xB0""C)\n"
-                    "Power down or improve airflow immediately!",
-                    DriveName(pD), pD->nTemperatureC, ALERT_TEMP_CRITICAL_C);
-                TrayBalloon(szTitle, szMsg, NIIF_ERROR);
-                pA->bTempCritSent = TRUE;
-                pA->bTempWarnSent = TRUE;
-            } else if (pD->nTemperatureC >= ALERT_TEMP_WARN_C && !pA->bTempWarnSent) {
-                lstrcpyA(szTitle, "Warning: Drive Temperature High");
-                _snprintf(szMsg, sizeof(szMsg),
-                    "%s\nTemperature: %d\xC2\xB0""C (warning threshold: %d\xC2\xB0""C)\n"
-                    "Check system cooling.",
-                    DriveName(pD), pD->nTemperatureC, ALERT_TEMP_WARN_C);
-                TrayBalloon(szTitle, szMsg, NIIF_WARNING);
-                pA->bTempWarnSent = TRUE;
-            }
-
-            if (pD->nTemperatureC < ALERT_TEMP_WARN_C - 5) {
-                pA->bTempWarnSent = FALSE;
-                pA->bTempCritSent = FALSE;
-            }
-        }
-
-        if (pD->nHealthPercent >= 0) {
-            if (pD->nHealthPercent < ALERT_HEALTH_CRITICAL && !pA->bHealthCritSent) {
-                lstrcpyA(szTitle, "!! CRITICAL: Drive Health Very Poor !!");
-                _snprintf(szMsg, sizeof(szMsg),
-                    "%s\nHealth: %d%% — Back up all data immediately!\n"
-                    "Drive failure may be imminent.",
-                    DriveName(pD), pD->nHealthPercent);
-                TrayBalloon(szTitle, szMsg, NIIF_ERROR);
-                pA->bHealthCritSent = TRUE;
-                pA->bHealthWarnSent = TRUE;
-            } else if (pD->nHealthPercent < ALERT_HEALTH_WARN && !pA->bHealthWarnSent) {
-                lstrcpyA(szTitle, "Warning: Drive Health Degraded");
-                _snprintf(szMsg, sizeof(szMsg),
-                    "%s\nHealth: %d%% — Monitor closely and back up data.",
-                    DriveName(pD), pD->nHealthPercent);
-                TrayBalloon(szTitle, szMsg, NIIF_WARNING);
-                pA->bHealthWarnSent = TRUE;
-            }
-        }
-
-        if (pD->bPredictFailure && !pA->bFailurePredSent) {
-            lstrcpyA(szTitle, "!! DRIVE FAILURE PREDICTED !!");
-            _snprintf(szMsg, sizeof(szMsg),
-                "%s\nThe drive's SMART firmware predicts imminent failure.\n"
-                "Back up all data now!",
-                DriveName(pD));
-            TrayBalloon(szTitle, szMsg, NIIF_ERROR);
-            pA->bFailurePredSent = TRUE;
-        }
-
-        if (pD->bIsNVMe) {
-            BYTE crit = pD->nvmeHealth.CriticalWarning;
-            if (crit != 0 && !pA->bNVMeCritWarnSent) {
-                lstrcpyA(szTitle, "NVMe Critical Warning");
-                _snprintf(szMsg, sizeof(szMsg),
-                    "%s\nNVMe critical warning flags:%s%s%s%s%s",
-                    DriveName(pD),
-                    (crit & NVME_CRIT_WARN_SPARE_BELOW_THRESH)   ? " [Spare Low]"     : "",
-                    (crit & NVME_CRIT_WARN_TEMP_THRESHOLD)       ? " [Temp Exceeded]" : "",
-                    (crit & NVME_CRIT_WARN_RELIABILITY_DEGRADED) ? " [Reliability!]"  : "",
-                    (crit & NVME_CRIT_WARN_READ_ONLY)            ? " [Read-Only!]"    : "",
-                    (crit & NVME_CRIT_WARN_VOLATILE_MEM_BACKUP)  ? " [Volatile Mem]"  : "");
-                TrayBalloon(szTitle, szMsg, NIIF_ERROR);
-                pA->bNVMeCritWarnSent = TRUE;
-            }
-            if (crit == 0) pA->bNVMeCritWarnSent = FALSE;
-        }
-
-        if (!pD->bIsNVMe && !pD->bIsUSB) {
-            int k;
-            DWORD dwR05 = 0, dwRC6 = 0;
-            for (k = 0; k < 30; k++) {
-                BYTE  id = pD->attrData.stAttributes[k].bAttrID;
-                DWORD dw = GetRawValue(pD->attrData.stAttributes[k].bRawValue);
-                if (id == 0x05) dwR05 = dw;
-                if (id == 0xC6) dwRC6 = dw;
-            }
-            if (dwR05 > 0 && !pA->bReallocSent) {
-                lstrcpyA(szTitle, "Warning: Reallocated Sectors Detected");
-                _snprintf(szMsg, sizeof(szMsg),
-                    "%s\nReallocated sectors: %lu\n"
-                    "This indicates physical damage on the drive surface.",
-                    DriveName(pD), (unsigned long)dwR05);
-                TrayBalloon(szTitle, szMsg, NIIF_WARNING);
-                pA->bReallocSent = TRUE;
-            }
-            if (dwRC6 > 0 && !pA->bUncorrectSent) {
-                lstrcpyA(szTitle, "!! Uncorrectable Errors Detected !!");
-                _snprintf(szMsg, sizeof(szMsg),
-                    "%s\nUncorrectable errors: %lu\n"
-                    "Data integrity at risk — back up immediately!",
-                    DriveName(pD), (unsigned long)dwRC6);
-                TrayBalloon(szTitle, szMsg, NIIF_ERROR);
-                pA->bUncorrectSent = TRUE;
-            }
-        }
-    }
-
-    for (i = g_nDriveCount; i < MAX_DRIVES; i++)
-        ZeroMemory(&g_AlertState[i], sizeof(DRIVE_ALERT_STATE));
 }
 
 static void Snapshot_Diff(void)
@@ -657,105 +433,6 @@ static void DeviceNotify_Unregister(void)
     }
 }
 
-void TrayIcon_Add(HWND hWnd)
-{
-    int i;
-    ZeroMemory(g_nid,      sizeof(g_nid));
-    ZeroMemory(g_bTraySlot,sizeof(g_bTraySlot));
-    g_nTrayCount = 0;
-
-    g_nid[0].cbSize           = sizeof(NOTIFYICONDATAA);
-    g_nid[0].hWnd             = hWnd;
-    g_nid[0].uID              = IDI_TRAY + 0;
-    g_nid[0].uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    g_nid[0].uCallbackMessage = WM_TRAYICON;
-    g_nid[0].hIcon            = BuildHealthIcon(-1);
-    lstrcpyA(g_nid[0].szTip,  "HDDHealth Monitor - scanning...");
-    Shell_NotifyIconA(NIM_ADD, &g_nid[0]);
-    g_bTraySlot[0] = TRUE;
-    g_nTrayCount   = 1;
-    (void)i;
-}
-
-void TrayIcon_Remove(void)
-{
-    int i;
-    for (i = 0; i < MAX_DRIVES; i++) {
-        if (g_bTraySlot[i]) {
-            if (g_nid[i].hIcon) { DestroyIcon(g_nid[i].hIcon); g_nid[i].hIcon = NULL; }
-            Shell_NotifyIconA(NIM_DELETE, &g_nid[i]);
-            g_bTraySlot[i] = FALSE;
-        }
-    }
-    g_nTrayCount = 0;
-}
-
-void TrayIcon_Update(void)
-{
-    int i;
-    HWND hWnd = g_hMainWnd;
-
-    for (i = g_nDriveCount; i < MAX_DRIVES; i++) {
-        if (g_bTraySlot[i]) {
-            if (g_nid[i].hIcon) { DestroyIcon(g_nid[i].hIcon); g_nid[i].hIcon = NULL; }
-            Shell_NotifyIconA(NIM_DELETE, &g_nid[i]);
-            g_bTraySlot[i] = FALSE;
-        }
-    }
-
-    for (i = 0; i < g_nDriveCount; i++) {
-        int    h       = g_Drives[i].nHealthPercent;
-        UINT   uID     = (UINT)(IDI_TRAY + i);
-        char   szTip[128];
-        HICON  hNewIcon = BuildHealthIcon(h);
-
-        if (h >= 0)
-            _snprintf(szTip, sizeof(szTip), "Drive %d: Health %d%%\n%s",
-                      g_Drives[i].nDriveIndex, h,
-                      (strlen(g_Drives[i].szModel) ? g_Drives[i].szModel : "HDDHealth Monitor"));
-        else
-            _snprintf(szTip, sizeof(szTip), "Drive %d: Health N/A\n%s",
-                      g_Drives[i].nDriveIndex,
-                      (strlen(g_Drives[i].szModel) ? g_Drives[i].szModel : "HDDHealth Monitor"));
-
-        if (!g_bTraySlot[i]) {
-            ZeroMemory(&g_nid[i], sizeof(NOTIFYICONDATAA));
-            g_nid[i].cbSize           = sizeof(NOTIFYICONDATAA);
-            g_nid[i].hWnd             = hWnd;
-            g_nid[i].uID              = uID;
-            g_nid[i].uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-            g_nid[i].uCallbackMessage = WM_TRAYICON;
-            g_nid[i].hIcon            = hNewIcon;
-            lstrcpynA(g_nid[i].szTip, szTip, sizeof(g_nid[i].szTip) - 1);
-            Shell_NotifyIconA(NIM_ADD, &g_nid[i]);
-            g_bTraySlot[i] = TRUE;
-        } else {
-            if (g_nid[i].hIcon) DestroyIcon(g_nid[i].hIcon);
-            g_nid[i].hIcon  = hNewIcon;
-            g_nid[i].uFlags = NIF_ICON | NIF_TIP;
-            lstrcpynA(g_nid[i].szTip, szTip, sizeof(g_nid[i].szTip) - 1);
-            Shell_NotifyIconA(NIM_MODIFY, &g_nid[i]);
-        }
-    }
-
-    g_nTrayCount = g_nDriveCount;
-}
-
-void TrayIcon_ShowContextMenu(HWND hWnd)
-{
-    POINT pt;
-    GetCursorPos(&pt);
-
-    HMENU hMenu = CreatePopupMenu();
-    AppendMenuU8(hMenu, MF_STRING, IDM_SHOW_WINDOW,  "Открыть HDDHealth Monitor");
-    AppendMenuU8(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuU8(hMenu, MF_STRING, IDM_EXIT, "Выход");
-
-    SetForegroundWindow(hWnd);
-    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
-    DestroyMenu(hMenu);
-}
-
 void DestroyGDIObjects(void){
     if (g_hbrBG)     DeleteObject(g_hbrBG);
     if (g_hbrPanel)  DeleteObject(g_hbrPanel);
@@ -776,6 +453,30 @@ COLORREF GetHealthColor(int nHealth)
     return CLR_RED;
 }
 
+static void FillGradientV(HDC hdc, const RECT* prc, COLORREF clrTop, COLORREF clrBot)
+{
+    TRIVERTEX vt[2];
+    GRADIENT_RECT gr;
+
+    if (!prc || prc->right <= prc->left || prc->bottom <= prc->top)
+        return;
+
+    ZeroMemory(vt, sizeof(vt));
+    vt[0].x     = prc->left;
+    vt[0].y     = prc->top;
+    vt[0].Red   = (COLOR16)(GetRValue(clrTop) << 8);
+    vt[0].Green = (COLOR16)(GetGValue(clrTop) << 8);
+    vt[0].Blue  = (COLOR16)(GetBValue(clrTop) << 8);
+    vt[1].x     = prc->right;
+    vt[1].y     = prc->bottom;
+    vt[1].Red   = (COLOR16)(GetRValue(clrBot) << 8);
+    vt[1].Green = (COLOR16)(GetGValue(clrBot) << 8);
+    vt[1].Blue  = (COLOR16)(GetBValue(clrBot) << 8);
+    gr.UpperLeft  = 0;
+    gr.LowerRight = 1;
+    GradientFill(hdc, vt, 2, &gr, 1, GRADIENT_FILL_RECT_V);
+}
+
 static void DrawGlassShine(HDC hdc, RECT* prc)
 {
     int w = prc->right  - prc->left;
@@ -786,24 +487,12 @@ static void DrawGlassShine(HDC hdc, RECT* prc)
     HBITMAP hbm     = CreateCompatibleBitmap(hdc, w, h);
     HBITMAP hbmOld  = (HBITMAP)SelectObject(hdcMem, hbm);
 
-    int y;
-    for (y = 0; y < h; y++) {
-        int alpha = 110 - (int)((110 - 18) * y / (h > 1 ? h - 1 : 1));
-        int r = (255 * alpha) / 255;
-        int g = (255 * alpha) / 255;
-        int b = (255 * alpha) / 255;
-        HBRUSH hbrLine = CreateSolidBrush(RGB(r, g, b));
-        RECT rcLine = { 0, y, w, y + 1 };
-        FillRect(hdcMem, &rcLine, hbrLine);
-        DeleteObject(hbrLine);
-    }
+    RECT rcFill = { 0, 0, w, h };
+    FillGradientV(hdcMem, &rcFill, RGB(255, 255, 255), RGB(42, 42, 42));
 
-    for (y = 0; y < h; y++) {
-        int alpha = 110 - (int)((110 - 18) * y / (h > 1 ? h - 1 : 1));
-        BLENDFUNCTION bfRow = { AC_SRC_OVER, 0, (BYTE)alpha, 0 };
-        AlphaBlend(hdc, prc->left, prc->top + y, w, 1,
-                   hdcMem, 0, y, w, 1, bfRow);
-    }
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 80, 0 };
+    AlphaBlend(hdc, prc->left, prc->top, w, h,
+               hdcMem, 0, 0, w, h, bf);
 
     SelectObject(hdcMem, hbmOld);
     DeleteObject(hbm);
@@ -861,19 +550,8 @@ LRESULT CALLBACK HealthBarWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
                     clrTop = RGB(220,  50,  40);
                     clrBot = RGB(160,  20,  15);
                 }
-                int y;
-                for (y = 0; y < cyBar; y++) {
-                    float t  = (cyBar > 1) ? (float)y / (float)(cyBar - 1) : 0.0f;
-                    int cr = (int)(GetRValue(clrTop) + t * (int)(GetRValue(clrBot) - GetRValue(clrTop)));
-                    int cg = (int)(GetGValue(clrTop) + t * (int)(GetGValue(clrBot) - GetGValue(clrTop)));
-                    int cb = (int)(GetBValue(clrTop) + t * (int)(GetBValue(clrBot) - GetBValue(clrTop)));
-                    HPEN hpCol = CreatePen(PS_SOLID, 1, RGB(cr, cg, cb));
-                    HPEN hpOld = (HPEN)SelectObject(hdc, hpCol);
-                    MoveToEx(hdc, 0,     y, NULL);
-                    LineTo  (hdc, cxBar, y);
-                    SelectObject(hdc, hpOld);
-                    DeleteObject(hpCol);
-                }
+                RECT rcGrad = { 0, 0, cxBar, cyBar };
+                FillGradientV(hdc, &rcGrad, clrTop, clrBot);
             }
 
             int nFillPct = (nHealth < 0) ? 100 : nHealth;
@@ -925,9 +603,9 @@ LRESULT CALLBACK HealthBarWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
             {
                 char szPct[16];
                 if (nHealth < 0)
-                    _snprintf(szPct, sizeof(szPct), "N/A");
+                    safe_snprintf(szPct, "N/A");
                 else
-                    _snprintf(szPct, sizeof(szPct), "%d%%", nHealth);
+                    safe_snprintf(szPct, "%d%%", nHealth);
 
                 HFONT hUseFont = g_hFontBig ? g_hFontBig : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
                 HFONT hOldFont = (HFONT)SelectObject(hdc, hUseFont);
@@ -956,7 +634,7 @@ LRESULT CALLBACK HealthBarWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lP
         return 1;
     }
 
-    return DefWindowProcA(hWnd, uMsg, wParam, lParam);
+    return DefWindowProc(hWnd, uMsg, wParam, lParam);
 }
 
 LRESULT CALLBACK PerfBarWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -986,19 +664,8 @@ LRESULT CALLBACK PerfBarWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             int rx    = 5;
 
             {
-                int y;
-                for (y = 0; y < cyBar; y++) {
-                    float t  = (cyBar > 1) ? (float)y / (float)(cyBar - 1) : 0.0f;
-                    int cr = 204 - (int)(t * 30);
-                    int cg = 232 - (int)(t * 40);
-                    int cb = 248 - (int)(t * 32);
-                    HPEN hpR = CreatePen(PS_SOLID, 1, RGB(cr, cg, cb));
-                    HPEN hpO = (HPEN)SelectObject(hdc, hpR);
-                    MoveToEx(hdc, 0,      y, NULL);
-                    LineTo  (hdc, cxBar,  y);
-                    SelectObject(hdc, hpO);
-                    DeleteObject(hpR);
-                }
+                RECT rcBg = { 0, 0, cxBar, cyBar };
+                FillGradientV(hdc, &rcBg, RGB(204, 232, 248), RGB(174, 192, 216));
             }
 
             int nFillPct = (nPerf < 0) ? 100 : nPerf;
@@ -1017,19 +684,8 @@ LRESULT CALLBACK PerfBarWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
                     clrBot = RGB(160,  20,  15);
                 }
 
-                int y;
-                for (y = 0; y < cyBar; y++) {
-                    float t  = (cyBar > 1) ? (float)y / (float)(cyBar - 1) : 0.0f;
-                    int cr = (int)(GetRValue(clrTop) + t * (GetRValue(clrBot) - GetRValue(clrTop)));
-                    int cg = (int)(GetGValue(clrTop) + t * (GetGValue(clrBot) - GetGValue(clrTop)));
-                    int cb = (int)(GetBValue(clrTop) + t * (GetBValue(clrBot) - GetBValue(clrTop)));
-                    HPEN hpR = CreatePen(PS_SOLID, 1, RGB(cr, cg, cb));
-                    HPEN hpO = (HPEN)SelectObject(hdc, hpR);
-                    MoveToEx(hdc, 0,          y, NULL);
-                    LineTo  (hdc, nFillW,     y);
-                    SelectObject(hdc, hpO);
-                    DeleteObject(hpR);
-                }
+                RECT rcFill = { 0, 0, nFillW, cyBar };
+                FillGradientV(hdc, &rcFill, clrTop, clrBot);
 
                 HPEN hpEdge = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
                 HPEN hpEdgeOld = (HPEN)SelectObject(hdc, hpEdge);
@@ -1081,9 +737,9 @@ LRESULT CALLBACK PerfBarWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             {
                 char szPct[16];
                 if (nPerf < 0)
-                    _snprintf(szPct, sizeof(szPct), "N/A");
+                    safe_snprintf(szPct, "N/A");
                 else
-                    _snprintf(szPct, sizeof(szPct), "%d%%", nPerf);
+                    safe_snprintf(szPct, "%d%%", nPerf);
 
                 HFONT hUseFont = g_hFontBig ? g_hFontBig : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
                 HFONT hOldFont = (HFONT)SelectObject(hdc, hUseFont);
@@ -1112,7 +768,7 @@ LRESULT CALLBACK PerfBarWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         return 1;
     }
 
-    return DefWindowProcA(hWnd, uMsg, wParam, lParam);
+    return DefWindowProc(hWnd, uMsg, wParam, lParam);
 }
 
 LRESULT CALLBACK DriveBtnWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -1139,22 +795,19 @@ LRESULT CALLBACK DriveBtnWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
             BOOL bSelected = (nIdx == g_nSelectedDrive);
             BOOL bHover    = (GetPropA(hWnd, "hover") != NULL);
 
-            COLORREF clrBg, clrBorder, clrText;
+            COLORREF clrBorder, clrText;
             if (bSelected) {
-                clrBg     = RGB(30, 100, 210);
-                clrBorder = RGB(20,  70, 170);
+                clrBorder = RGB(70, 130, 205);
                 clrText   = RGB(255, 255, 255);
             } else if (bHover) {
-                clrBg     = RGB(220, 228, 248);
-                clrBorder = RGB(140, 165, 220);
+                clrBorder = RGB(150, 180, 220);
                 clrText   = RGB(30,  35,  50);
             } else {
-                clrBg     = RGB(255, 255, 255);
-                clrBorder = RGB(200, 205, 220);
+                clrBorder = RGB(190, 205, 225);
                 clrText   = RGB(30,  35,  50);
             }
 
-            int rx = 6;
+            int rx = 10;
 
             {
                 HBRUSH hbrWinBg = CreateSolidBrush(CLR_BG);
@@ -1166,30 +819,19 @@ LRESULT CALLBACK DriveBtnWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
             SelectClipRgn(hdc, hClipRgn);
 
             {
-                int y;
                 COLORREF clrTop, clrBot;
                 if (bSelected) {
-                    clrTop = RGB( 60, 130, 240);
-                    clrBot = RGB( 20,  80, 190);
+                    clrTop = RGB(130, 185, 245);
+                    clrBot = RGB( 70, 135, 220);
                 } else if (bHover) {
-                    clrTop = RGB(235, 242, 255);
-                    clrBot = RGB(205, 218, 248);
+                    clrTop = RGB(240, 246, 255);
+                    clrBot = RGB(210, 224, 245);
                 } else {
                     clrTop = RGB(252, 254, 255);
-                    clrBot = RGB(228, 233, 245);
+                    clrBot = RGB(232, 238, 248);
                 }
-                for (y = 0; y < h; y++) {
-                    float t  = (h > 1) ? (float)y / (float)(h - 1) : 0.0f;
-                    int cr = (int)(GetRValue(clrTop) + t * (int)(GetRValue(clrBot) - GetRValue(clrTop)));
-                    int cg = (int)(GetGValue(clrTop) + t * (int)(GetGValue(clrBot) - GetGValue(clrTop)));
-                    int cb = (int)(GetBValue(clrTop) + t * (int)(GetBValue(clrBot) - GetBValue(clrTop)));
-                    HPEN hpR = CreatePen(PS_SOLID, 1, RGB(cr, cg, cb));
-                    HPEN hpO = (HPEN)SelectObject(hdc, hpR);
-                    MoveToEx(hdc, 0,  y, NULL);
-                    LineTo  (hdc, w,  y);
-                    SelectObject(hdc, hpO);
-                    DeleteObject(hpR);
-                }
+                RECT rcGradBtn = { 0, 0, w, h };
+                FillGradientV(hdc, &rcGradBtn, clrTop, clrBot);
             }
 
             { RECT rcShineBtn = { 0, 0, w, h }; DrawGlassShine(hdc, &rcShineBtn); }
@@ -1204,6 +846,18 @@ LRESULT CALLBACK DriveBtnWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
                 DeleteObject(hpBord);
             }
 
+            /* 1px light top/left glass edge */
+            {
+                HPEN hpHL = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
+                HPEN hpOld = (HPEN)SelectObject(hdc, hpHL);
+                MoveToEx(hdc, rcBuf.left + rx, rcBuf.top + 1, NULL);
+                LineTo(hdc, rcBuf.right - rx, rcBuf.top + 1);
+                MoveToEx(hdc, rcBuf.left + 1, rcBuf.top + rx, NULL);
+                LineTo(hdc, rcBuf.left + 1, rcBuf.bottom - rx);
+                SelectObject(hdc, hpOld);
+                DeleteObject(hpHL);
+            }
+
             SelectClipRgn(hdc, NULL);
             DeleteObject(hClipRgn);
 
@@ -1214,34 +868,34 @@ LRESULT CALLBACK DriveBtnWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 
                 char szName[64];
                 if (strlen(pD->szModel) > 0) {
-                    _snprintf(szName, sizeof(szName), "%s", pD->szModel);
+                    safe_snprintf(szName, "%s", pD->szModel);
                     if (strlen(szName) > 26) { szName[24] = '.'; szName[25] = '.'; szName[26] = '\0'; }
                 } else {
-                    _snprintf(szName, sizeof(szName), "Диск %d", pD->nDriveIndex);
+                    safe_snprintf(szName, "Диск %d", pD->nDriveIndex);
                 }
 
                 char szType[16];
                 const char* szT = GetDriveTypeName(pD->eType);
-                _snprintf(szType, sizeof(szType), "[%s]", szT ? szT : "?");
+                safe_snprintf(szType, "[%s]", szT ? szT : "?");
 
                 char szPerf[24];
                 if (pD->nPerformancePercent >= 0)
-                    _snprintf(szPerf, sizeof(szPerf), "Скор: %d%%", pD->nPerformancePercent);
+                    safe_snprintf(szPerf, "Скор: %d%%", pD->nPerformancePercent);
                 else
-                    _snprintf(szPerf, sizeof(szPerf), "Скор: —");
+                    safe_snprintf(szPerf, "Скор: —");
 
                 char szHealth[24];
                 if (pD->nHealthPercent >= 0)
-                    _snprintf(szHealth, sizeof(szHealth), "Здор: %d%%", pD->nHealthPercent);
+                    safe_snprintf(szHealth, "Здор: %d%%", pD->nHealthPercent);
                 else
-                    _snprintf(szHealth, sizeof(szHealth), "Здор: —");
+                    safe_snprintf(szHealth, "Здор: —");
 
                 char szCap[24];
                 FormatSize(pD->dwCapacityMB, szCap, sizeof(szCap));
 
                 char szTempStr[24];
                 if (pD->nTemperatureC > 0)
-                    _snprintf(szTempStr, sizeof(szTempStr), "%d\xC2\xB0""C", pD->nTemperatureC);
+                    safe_snprintf(szTempStr, "%d\xC2\xB0""C", pD->nTemperatureC);
                 else
                     szTempStr[0] = '\0';
 
@@ -1340,35 +994,35 @@ LRESULT CALLBACK DriveBtnWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
         return TRUE;
     }
 
-    return DefWindowProcA(hWnd, uMsg, wParam, lParam);
+    return DefWindowProc(hWnd, uMsg, wParam, lParam);
 }
 
 void RegisterHealthBarClass(HINSTANCE hInst)
 {
-    WNDCLASSA wc;
+    WNDCLASSW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = HealthBarWndProc;
     wc.hInstance     = hInst;
     wc.hbrBackground = NULL;
-    wc.lpszClassName = "LLHDHealthBar";
-    RegisterClassA(&wc);
+    wc.lpszClassName = L"LLHDHealthBar";
+    RegisterClassW(&wc);
 
     ZeroMemory(&wc, sizeof(wc));
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = PerfBarWndProc;
     wc.hInstance     = hInst;
     wc.hbrBackground = NULL;
-    wc.lpszClassName = "LLHDPerfBar";
-    RegisterClassA(&wc);
+    wc.lpszClassName = L"LLHDPerfBar";
+    RegisterClassW(&wc);
 
     ZeroMemory(&wc, sizeof(wc));
     wc.style         = CS_DBLCLKS;
     wc.lpfnWndProc   = DriveBtnWndProc;
     wc.hInstance     = hInst;
     wc.hbrBackground = NULL;
-    wc.lpszClassName = "LLHDDriveBtn";
-    RegisterClassA(&wc);
+    wc.lpszClassName = L"LLHDDriveBtn";
+    RegisterClassW(&wc);
 }
 
 void RepaintHealthBar(void)
@@ -1440,42 +1094,6 @@ void UpdateDriveButtons(HWND hWnd)
 }
 
 
-/* Heuristic: small consumer USB sticks almost never expose SMART.
- * Enclosure bridges (RTL9210, JMicron, ASMedia, Realtek, …) are NOT flash. */
-static BOOL BridgeLooksLikeEnclosure(const DRIVE_INFO* p)
-{
-    char hay[384];
-    if (!p) return FALSE;
-    switch (p->eUsbBridgeType) {
-    case USB_BRIDGE_NVME_JMICRON:
-    case USB_BRIDGE_NVME_ASMEDIA:
-    case USB_BRIDGE_NVME_REALTEK:
-    case USB_BRIDGE_NVME_VLI:
-    case USB_BRIDGE_NVME_FMA:
-    case USB_BRIDGE_ASM1352R:
-    case USB_BRIDGE_JMICRON:
-        return TRUE;
-    default:
-        break;
-    }
-    _snprintf(hay, sizeof(hay), "%s %s %s",
-              p->szModel, p->szBridgeVendor, p->szBridgeProduct);
-    if (strstr(hay, "RTL9210") || strstr(hay, "RTL921") ||
-        strstr(hay, "Realtek") || strstr(hay, "REALTEK") ||
-        strstr(hay, "JMS") || strstr(hay, "JMicron") || strstr(hay, "JMICRON") ||
-        strstr(hay, "ASMedia") || strstr(hay, "ASMEDIA") ||
-        strstr(hay, "ASM1") || strstr(hay, "ASM2") ||
-        strstr(hay, "VL71") || strstr(hay, "VL716") || strstr(hay, "VL717"))
-        return TRUE;
-    return FALSE;
-}
-
-static BOOL IsLikelyUsbFlash(const DRIVE_INFO* p)
-{
-    if (!p || !p->bIsUSB || p->bSMART_Supported) return FALSE;
-    return IsLikelyUsbFlashDrive(p);
-}
-
 void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
 {
     if (nDriveIdx < 0 || nDriveIdx >= g_nDriveCount) {
@@ -1507,52 +1125,31 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
     {
         char szSize[32];
         FormatSize(pInfo->dwCapacityMB, szSize, sizeof(szSize));
-        _snprintf(szBuf, sizeof(szBuf), "%s   Тип: %s",
+        safe_snprintf(szBuf, "%s   Тип: %s",
                   szSize, GetDriveTypeName(pInfo->eType));
         SetDlgItemTextU8(hWnd, IDC_SIZE_STATIC, szBuf);
     }
 
     if (pInfo->nTemperatureC > 0)
-        _snprintf(szBuf, sizeof(szBuf), "%d\xC2\xB0""C", pInfo->nTemperatureC);
+        safe_snprintf(szBuf, "%d\xC2\xB0""C", pInfo->nTemperatureC);
     else
-        _snprintf(szBuf, sizeof(szBuf), "-");
+        safe_snprintf(szBuf, "-");
     SetDlgItemTextU8(hWnd, IDC_TEMP_STATIC, szBuf);
 
-    if (pInfo->bIsNVMe && pInfo->bSMART_Supported) {
-        char szTbw[32];
-        FormatNvmeHostBytes(NVMeRead128Lo(pInfo->nvmeHealth.DataUnitsWritten),
-                            szTbw, sizeof(szTbw));
-        _snprintf(szBuf, sizeof(szBuf),
-            "Запас %d%%  ·  Износ %d%%  ·  Записано %s",
-            (int)pInfo->nvmeHealth.AvailableSpare,
-            (int)pInfo->nvmeHealth.PercentageUsed,
-            szTbw);
-    } else if (pInfo->bIsNVMe && !pInfo->bSMART_Supported) {
-        _snprintf(szBuf, sizeof(szBuf), "NVMe Health Log ошибка (err %lu)",
-            pInfo->dwErrNvmeProtocol);
-    } else if (pInfo->bIsUSB && !pInfo->bSMART_Supported) {
-        if (IsLikelyUsbFlash(pInfo))
-            _snprintf(szBuf, sizeof(szBuf), "SMART недоступен (USB-флешка)");
-        else
-            _snprintf(szBuf, sizeof(szBuf), "SMART недоступен (USB-мост)");
-    } else if (pInfo->bIsUSB && pInfo->bSMART_Supported) {
-        if (pInfo->eAccessMethod == SMART_ACCESS_SAT16 &&
-            pInfo->attrData.stAttributes[0].bAttrID == 0 &&
-            pInfo->attrData.wRevisionNumber == 0) {
-            /* No ATA attribute table was populated — this came from the
-             * SCSI LOG SENSE fallback only (temperature / failure flag). */
-            _snprintf(szBuf, sizeof(szBuf), "USB, ограничено (SCSI Log Sense)");
-        } else if (!FormatAtaSsdSmartLine(pInfo, szBuf, sizeof(szBuf))) {
-            _snprintf(szBuf, sizeof(szBuf), "USB SAT, %s",
-                      pInfo->bSMART_Enabled ? "включён" : "обнаружен");
-        }
-    } else if (pInfo->bSMART_Supported) {
-        if (!FormatAtaSsdSmartLine(pInfo, szBuf, sizeof(szBuf))) {
-            _snprintf(szBuf, sizeof(szBuf), "%s",
-                      pInfo->bSMART_Enabled ? "Поддерживается, включён" : "Поддерживается, выключен");
+    if (!pInfo->bSMART_Supported) {
+        if (pInfo->bIsNVMe)
+            safe_snprintf(szBuf, "NVMe Health Log ошибка (err %lu)",
+                (unsigned long)pInfo->dwErrNvmeProtocol);
+        else if (pInfo->bIsUSB) {
+            if (IsLikelyUsbFlashDrive(pInfo))
+                safe_snprintf(szBuf, "SMART недоступен (USB-флешка)");
+            else
+                safe_snprintf(szBuf, "SMART недоступен (USB-мост)");
+        } else {
+            safe_snprintf(szBuf, "Не поддерживается");
         }
     } else {
-        _snprintf(szBuf, sizeof(szBuf), "Не поддерживается");
+        FormatSmartHeadline(pInfo, szBuf, sizeof(szBuf));
     }
     SetDlgItemTextU8(hWnd, IDC_STATUS_STATIC, szBuf);
 
@@ -1572,7 +1169,7 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
     if (pInfo->bIsNVMe && pInfo->bSMART_Supported) {
         BYTE crit = pInfo->nvmeHealth.CriticalWarning;
         if (crit != 0) {
-            _snprintf(szReason, sizeof(szReason), "Крит. предупреждение:%s%s%s%s%s",
+            safe_snprintf(szReason, "Крит. предупреждение:%s%s%s%s%s",
                 (crit & NVME_CRIT_WARN_SPARE_BELOW_THRESH)   ? " [Мало запаса]"     : "",
                 (crit & NVME_CRIT_WARN_TEMP_THRESHOLD)       ? " [Перегрев]"        : "",
                 (crit & NVME_CRIT_WARN_RELIABILITY_DEGRADED) ? " [Надёжность!]"     : "",
@@ -1592,11 +1189,11 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
             else if (id == 0xBB) dwRBB = dw;
         }
         if (dwRC6 > 0)
-            _snprintf(szReason, sizeof(szReason),
+            safe_snprintf(szReason,
                 "Неисправимые: %u   Переназначено: %u   Нестабильные: %u   События: %u",
                 (unsigned)dwRC6, (unsigned)dwR05, (unsigned)dwRC5, (unsigned)dwRC4);
         else if (dwRC5 > 0 || dwR05 > 0)
-            _snprintf(szReason, sizeof(szReason),
+            safe_snprintf(szReason,
                 "Переназначено: %u   Нестабильные: %u   События: %u   ECC: %u",
                 (unsigned)dwR05, (unsigned)dwRC5, (unsigned)dwRC4, (unsigned)dwRBB);
     }
@@ -1605,7 +1202,7 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
         char szBridge[80], szName[64];
         FormatUsbAdapterName(pInfo, szName, sizeof(szName));
         if (szName[0] && strcmp(szName, "—") != 0)
-            _snprintf(szBridge, sizeof(szBridge), " [%s]", szName);
+            safe_snprintf(szBridge, " [%s]", szName);
         else
             szBridge[0] = '\0';
 
@@ -1613,25 +1210,24 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
         if (dwErr == 0) dwErr = pInfo->dwErrSat12;
         if (dwErr == 0) dwErr = pInfo->dwErrStorageProtocol;
         if (dwErr == 0) dwErr = pInfo->dwErrNvmeProtocol;
-        if (dwErr == 0) dwErr = pInfo->dwErrNvmePassthrough;
         if (dwErr == 0) dwErr = pInfo->dwErrLogSense;
 
-        if (IsLikelyUsbFlash(pInfo)) {
+        if (IsLikelyUsbFlashDrive(pInfo)) {
             if (dwErr != 0)
-                _snprintf(szBuf, sizeof(szBuf),
+                safe_snprintf(szBuf,
                     "У этой USB-флешки SMART не отдаётся — так у большинства флешек. "
                     "Код ошибки: %lu.",
                     (unsigned long)dwErr);
             else
-                _snprintf(szBuf, sizeof(szBuf),
+                safe_snprintf(szBuf,
                     "У этой USB-флешки SMART не отдаётся — так у большинства флешек.");
         } else {
             if (dwErr != 0)
-                _snprintf(szBuf, sizeof(szBuf),
+                safe_snprintf(szBuf,
                     "USB-корпус/мост не отдаёт SMART%s. Код ошибки: %lu.",
                     szBridge, (unsigned long)dwErr);
             else
-                _snprintf(szBuf, sizeof(szBuf),
+                safe_snprintf(szBuf,
                     "USB-корпус/мост не отдаёт SMART%s "
                     "(SAT/vendor passthrough недоступен).",
                     szBridge);
@@ -1640,9 +1236,9 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
     } else if (pInfo->bIsNVMe && !pInfo->bSMART_Supported) {
         {
             char szErr[320];
-            _snprintf(szErr, sizeof(szErr),
+            safe_snprintf(szErr,
                 "NVMe Health Log IOCTL не удался (Win32 %lu). 5=нет прав, 1/50=не поддерживается, 87=плохой запрос.",
-                pInfo->dwErrNvmeProtocol);
+                (unsigned long)pInfo->dwErrNvmeProtocol);
             SetDlgItemTextU8(hWnd, IDC_PREDICT_STATIC, szErr);
         }
     } else if (pInfo->nHealthPercent < 0) {
@@ -1652,15 +1248,15 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
         SetDlgItemTextU8(hWnd, IDC_PREDICT_STATIC, "!! ДИСК ПРЕДСКАЗАЛ СВОЙ ОТКАЗ !!");
     } else if (pInfo->nHealthPercent < 40) {
         char szMsg[320];
-        _snprintf(szMsg, sizeof(szMsg), "!! Плохое состояние — срочно сделайте копию!  %s", szReason);
+        safe_snprintf(szMsg, "!! Плохое состояние — срочно сделайте копию!  %s", szReason);
         SetDlgItemTextU8(hWnd, IDC_PREDICT_STATIC, szMsg);
     } else if (pInfo->nHealthPercent < 70) {
         char szMsg[320];
-        _snprintf(szMsg, sizeof(szMsg), "Внимание: следите за диском.  %s", szReason);
+        safe_snprintf(szMsg, "Внимание: следите за диском.  %s", szReason);
         SetDlgItemTextU8(hWnd, IDC_PREDICT_STATIC, szMsg);
     } else if (pInfo->nHealthPercent < 100) {
         char szMsg[320];
-        _snprintf(szMsg, sizeof(szMsg), "Норма.  %s",
+        safe_snprintf(szMsg, "Норма.  %s",
             (szReason[0] ? szReason : "Критичные параметры в норме."));
         SetDlgItemTextU8(hWnd, IDC_PREDICT_STATIC, szMsg);
     } else {
@@ -1701,13 +1297,13 @@ static void AttrRowSet(ATTR_ROW* r,
                        const char* val, const char* worst, const char* thresh,
                        const char* raw, const char* stat)
 {
-    _snprintf(r->col[0], 128, "%s", id     ? id     : "");
-    _snprintf(r->col[1], 128, "%s", name   ? name   : "");
-    _snprintf(r->col[2], 128, "%s", val    ? val    : "");
-    _snprintf(r->col[3], 128, "%s", worst  ? worst  : "");
-    _snprintf(r->col[4], 128, "%s", thresh ? thresh : "");
-    _snprintf(r->col[5], 128, "%s", raw    ? raw    : "");
-    _snprintf(r->col[6], 128, "%s", stat   ? stat   : "");
+    safe_snprintf(r->col[0], "%s", id     ? id     : "");
+    safe_snprintf(r->col[1], "%s", name   ? name   : "");
+    safe_snprintf(r->col[2], "%s", val    ? val    : "");
+    safe_snprintf(r->col[3], "%s", worst  ? worst  : "");
+    safe_snprintf(r->col[4], "%s", thresh ? thresh : "");
+    safe_snprintf(r->col[5], "%s", raw    ? raw    : "");
+    safe_snprintf(r->col[6], "%s", stat   ? stat   : "");
 }
 
 /* Status badge code stored in LVITEM.lParam. Low 8 bits = ATTRST_*.
@@ -1739,8 +1335,24 @@ static LPARAM AttrStatusParam(const char* s)
     return (LPARAM)ATTRST_NONE;
 }
 
+static BOOL IsAtaSsdType(DRIVE_TYPE t)
+{
+    return t == DRIVE_TYPE_SSD_SATA || t == DRIVE_TYPE_M2_SATA;
+}
+
+static BOOL VendorUsesE7AsLife(DRIVE_VENDOR v, DRIVE_TYPE t)
+{
+    if (v == VENDOR_KINGSTON || v == VENDOR_ADATA ||
+        v == VENDOR_SKHYNIX || v == VENDOR_KIOXIA)
+        return TRUE;
+    if (v == VENDOR_TOSHIBA && IsAtaSsdType(t))
+        return TRUE;
+    return FALSE;
+}
+
 static void FormatSmartValue(BYTE bID, BYTE* pRaw,
                               BYTE bVal, BYTE bWorst, BYTE bThresh,
+                              DRIVE_VENDOR eVendor, DRIVE_TYPE eType,
                               char* szBuf, int nBufLen)
 {
 
@@ -1768,9 +1380,9 @@ static void FormatSmartValue(BYTE bID, BYTE* pRaw,
         int nF = nC * 9 / 5 + 32;
         int nMin = (int)pRaw[2], nMax = (int)pRaw[4];
         if (nMin > 0 && nMax > nMin && nMax < 100)
-            _snprintf(szMain, sizeof(szMain), "%d \xC2\xB0""C (%d \xC2\xB0""F)  мин:%d макс:%d", nC, nF, nMin, nMax);
+            safe_snprintf(szMain, "%d \xC2\xB0""C (%d \xC2\xB0""F)  мин:%d макс:%d", nC, nF, nMin, nMax);
         else
-            _snprintf(szMain, sizeof(szMain), "%d \xC2\xB0""C (%d \xC2\xB0""F)", nC, nF);
+            safe_snprintf(szMain, "%d \xC2\xB0""C (%d \xC2\xB0""F)", nC, nF);
         break;
     }
     case 0xC2:
@@ -1780,19 +1392,48 @@ static void FormatSmartValue(BYTE bID, BYTE* pRaw,
         int nF = nC * 9 / 5 + 32;
         int nMin = (int)pRaw[2], nMax = (int)pRaw[4];
         if (nMin > 0 && nMax > nMin && nMax < 100)
-            _snprintf(szMain, sizeof(szMain), "%d \xC2\xB0""C (%d \xC2\xB0""F)  мин:%d макс:%d", nC, nF, nMin, nMax);
+            safe_snprintf(szMain, "%d \xC2\xB0""C (%d \xC2\xB0""F)  мин:%d макс:%d", nC, nF, nMin, nMax);
         else
-            _snprintf(szMain, sizeof(szMain), "%d \xC2\xB0""C (%d \xC2\xB0""F)", nC, nF);
+            safe_snprintf(szMain, "%d \xC2\xB0""C (%d \xC2\xB0""F)", nC, nF);
         break;
     }
     case 0xE7:
+    {
+        int nLife = -1;
+        if (bVal <= 100)
+            nLife = (int)bVal;
+        else if (dw32 <= 100)
+            nLife = (int)dw32;
+        else if (w16 <= 100)
+            nLife = (int)w16;
+
+        if (VendorUsesE7AsLife(eVendor, eType)) {
+            if (nLife >= 0)
+                safe_snprintf(szMain, "%d%% остаток ресурса", nLife);
+            else
+                safe_snprintf(szMain, "%lu", (unsigned long)dw32);
+            break;
+        }
+        if ((eVendor == VENDOR_UNKNOWN || eVendor == VENDOR_OTHER) &&
+            IsAtaSsdType(eType)) {
+            if (nLife >= 0 && nLife <= 100)
+                safe_snprintf(szMain, "%d%% остаток ресурса", nLife);
+            else if (bVal > 0 && bVal <= 100) {
+                int nF = (int)bVal * 9 / 5 + 32;
+                safe_snprintf(szMain, "%d \xC2\xB0""C (%d \xC2\xB0""F)", (int)bVal, nF);
+            } else {
+                safe_snprintf(szMain, "%lu", (unsigned long)dw32);
+            }
+            break;
+        }
         if (bVal > 0 && bVal <= 100) {
             int nF = (int)bVal * 9 / 5 + 32;
-            _snprintf(szMain, sizeof(szMain), "%d \xC2\xB0""C (%d \xC2\xB0""F)", (int)bVal, nF);
+            safe_snprintf(szMain, "%d \xC2\xB0""C (%d \xC2\xB0""F)", (int)bVal, nF);
         } else {
-            _snprintf(szMain, sizeof(szMain), "%lu", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu", (unsigned long)dw32);
         }
         break;
+    }
 
     case 0x09:
     {
@@ -1801,81 +1442,81 @@ static void FormatSmartValue(BYTE bID, BYTE* pRaw,
         unsigned long nDays  = (unsigned long)(nHours / 24);
         double fYears = (double)nHours / 8760.0;
         if (fYears >= 1.0)
-            _snprintf(szMain, sizeof(szMain), "%llu ч  (%.1f лет)", nHours, fYears);
+            safe_snprintf(szMain, "%llu ч  (%.1f лет)", (unsigned long long)nHours, fYears);
         else
-            _snprintf(szMain, sizeof(szMain), "%llu ч  (%lu дн.)", nHours, nDays);
+            safe_snprintf(szMain, "%llu ч  (%lu дн.)", (unsigned long long)nHours, nDays);
         break;
     }
 
     case 0x04:
-        _snprintf(szMain, sizeof(szMain), "%lu раз", (unsigned long)dw32);
+        safe_snprintf(szMain, "%lu раз", (unsigned long)dw32);
         break;
 
     case 0x0C:
-        _snprintf(szMain, sizeof(szMain), "%lu циклов", (unsigned long)dw32);
+        safe_snprintf(szMain, "%lu циклов", (unsigned long)dw32);
         break;
 
     case 0x03:
     {
         WORD wMs = w16;
         if (wMs > 0 && wMs < 30000)
-            _snprintf(szMain, sizeof(szMain), "%u ms", wMs);
+            safe_snprintf(szMain, "%u ms", wMs);
         else
-            _snprintf(szMain, sizeof(szMain), "%lu", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu", (unsigned long)dw32);
         break;
     }
 
     case 0x0A:
         if (dw32 == 0)
-            _snprintf(szMain, sizeof(szMain), "0  (ОК)");
+            safe_snprintf(szMain, "0  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu повторов  (!)", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu повторов  (!)", (unsigned long)dw32);
         break;
 
     case 0x05:
     {
         DWORD dwSec = dw32 & 0xFFFF;
         if (dwSec == 0)
-            _snprintf(szMain, sizeof(szMain), "0  (ОК)");
+            safe_snprintf(szMain, "0  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu секторов  (!)", (unsigned long)dwSec);
+            safe_snprintf(szMain, "%lu секторов  (!)", (unsigned long)dwSec);
         break;
     }
 
     case 0xC4:
         if (dw32 == 0)
-            _snprintf(szMain, sizeof(szMain), "0 событий  (ОК)");
+            safe_snprintf(szMain, "0 событий  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu событий  (!)", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu событий  (!)", (unsigned long)dw32);
         break;
 
     case 0xC5:
         if (dw32 == 0)
-            _snprintf(szMain, sizeof(szMain), "0  (ОК)");
+            safe_snprintf(szMain, "0  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu нестабильных  (!)", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu нестабильных  (!)", (unsigned long)dw32);
         break;
 
     case 0xC6:
         if (dw32 == 0)
-            _snprintf(szMain, sizeof(szMain), "0  (ОК)");
+            safe_snprintf(szMain, "0  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu неисправимых  (!)", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu неисправимых  (!)", (unsigned long)dw32);
         break;
 
     case 0xC7:
         if (dw32 == 0)
-            _snprintf(szMain, sizeof(szMain), "0  (ОК)");
+            safe_snprintf(szMain, "0  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu ошибок CRC  (!)", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu ошибок CRC  (!)", (unsigned long)dw32);
         break;
 
     case 0xBB:
     case 0xC3:
         if (dw32 == 0)
-            _snprintf(szMain, sizeof(szMain), "0  (ОК)");
+            safe_snprintf(szMain, "0  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu ошибок ECC", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu ошибок ECC", (unsigned long)dw32);
         break;
 
     case 0xBC:
@@ -1883,59 +1524,71 @@ static void FormatSmartValue(BYTE bID, BYTE* pRaw,
         WORD wTotal  = (WORD)pRaw[0] | ((WORD)pRaw[1] << 8);
         WORD wLatest = (WORD)pRaw[2] | ((WORD)pRaw[3] << 8);
         if (wTotal == 0)
-            _snprintf(szMain, sizeof(szMain), "0  (ОК)");
+            safe_snprintf(szMain, "0  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%u таймаутов  (посл.: %u)", wTotal, wLatest);
+            safe_snprintf(szMain, "%u таймаутов  (посл.: %u)", wTotal, wLatest);
         break;
     }
 
     case 0xC1:
-        _snprintf(szMain, sizeof(szMain), "%lu циклов парковки", (unsigned long)dw32);
+        safe_snprintf(szMain, "%lu циклов парковки", (unsigned long)dw32);
         break;
 
     case 0xC0:
-        _snprintf(szMain, sizeof(szMain), "%lu аварийных парковок", (unsigned long)dw32);
+        safe_snprintf(szMain, "%lu аварийных парковок", (unsigned long)dw32);
         break;
 
     case 0xB7:
         if (dw32 == 0)
-            _snprintf(szMain, sizeof(szMain), "0  (ОК)");
+            safe_snprintf(szMain, "0  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu понижений  (!)", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu понижений  (!)", (unsigned long)dw32);
         break;
 
     case 0xB8:
         if (dw32 == 0)
-            _snprintf(szMain, sizeof(szMain), "0  (ОК)");
+            safe_snprintf(szMain, "0  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu ошибок  (!)", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu ошибок  (!)", (unsigned long)dw32);
         break;
 
     case 0xBF:
-        _snprintf(szMain, sizeof(szMain), "%lu ударов", (unsigned long)dw32);
+        safe_snprintf(szMain, "%lu ударов", (unsigned long)dw32);
         break;
 
     case 0x01:
     {
+        if (eVendor == VENDOR_SEAGATE) {
+            safe_snprintf(szMain, "%02X%02X%02X%02X%02X%02X  ошибки (мл. 16 бит): %u",
+                          pRaw[5], pRaw[4], pRaw[3], pRaw[2], pRaw[1], pRaw[0],
+                          (unsigned)w16);
+            break;
+        }
         DWORD dwErrHi = (((DWORD)pRaw[5] << 8) | (DWORD)pRaw[4]);
         if (dwErrHi > 0 && dw32 > 0 && dw32 < 0xFFFFFFFF)
-            _snprintf(szMain, sizeof(szMain), "%lu / %lu  (ош./всего)", (unsigned long)dwErrHi, (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu / %lu  (ош./всего)", (unsigned long)dwErrHi, (unsigned long)dw32);
         else if (dw32 == 0)
-            _snprintf(szMain, sizeof(szMain), "0  (ОК)");
+            safe_snprintf(szMain, "0  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu", (unsigned long)dw32);
         break;
     }
 
     case 0x07:
     {
+        if (eVendor == VENDOR_SEAGATE) {
+            safe_snprintf(szMain, "%02X%02X%02X%02X%02X%02X  ошибки (мл. 16 бит): %u",
+                          pRaw[5], pRaw[4], pRaw[3], pRaw[2], pRaw[1], pRaw[0],
+                          (unsigned)w16);
+            break;
+        }
         DWORD dwErrHi = (((DWORD)pRaw[5] << 8) | (DWORD)pRaw[4]);
         if (dwErrHi > 0 && dw32 > 0)
-            _snprintf(szMain, sizeof(szMain), "%lu / %lu  (ош./позиц.)", (unsigned long)dwErrHi, (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu / %lu  (ош./позиц.)", (unsigned long)dwErrHi, (unsigned long)dw32);
         else if (dw32 == 0)
-            _snprintf(szMain, sizeof(szMain), "0  (ОК)");
+            safe_snprintf(szMain, "0  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu", (unsigned long)dw32);
         break;
     }
 
@@ -1947,34 +1600,72 @@ static void FormatSmartValue(BYTE bID, BYTE* pRaw,
         unsigned __int64 nLBA = qw48;
         unsigned __int64 nGB  = nLBA / (1024ULL * 1024ULL * 2ULL);
         if (nGB >= 1024)
-            _snprintf(szMain, sizeof(szMain), "%llu LBA  (~%llu TB)", nLBA, nGB / 1024ULL);
+            safe_snprintf(szMain, "%llu LBA  (~%llu TB)", (unsigned long long)nLBA, (unsigned long long)(nGB / 1024ULL));
         else if (nGB > 0)
-            _snprintf(szMain, sizeof(szMain), "%llu LBA  (~%llu GB)", nLBA, nGB);
+            safe_snprintf(szMain, "%llu LBA  (~%llu GB)", (unsigned long long)nLBA, (unsigned long long)nGB);
         else
-            _snprintf(szMain, sizeof(szMain), "%llu LBA", nLBA);
+            safe_snprintf(szMain, "%llu LBA", (unsigned long long)nLBA);
         break;
     }
 
     case 0xF9:
-    case 0xE9:
     {
         unsigned __int64 nGiB = qw48;
         if (nGiB > 0 && nGiB < 1000000ULL)
-            _snprintf(szMain, sizeof(szMain), "%llu ГиБ записано", nGiB);
+            safe_snprintf(szMain, "%llu ГиБ записано", (unsigned long long)nGiB);
         else
-            _snprintf(szMain, sizeof(szMain), "%llu", nGiB);
+            safe_snprintf(szMain, "%llu", (unsigned long long)nGiB);
+        break;
+    }
+
+    case 0xE9:
+    {
+        if (eVendor == VENDOR_INTEL && bVal <= 100) {
+            safe_snprintf(szMain, "%u%%  индикатор износа", (unsigned)bVal);
+            break;
+        }
+        unsigned __int64 nGiB = qw48;
+        if (nGiB > 0 && nGiB < 1000000ULL)
+            safe_snprintf(szMain, "%llu ГиБ записано", (unsigned long long)nGiB);
+        else
+            safe_snprintf(szMain, "%llu", (unsigned long long)nGiB);
         break;
     }
 
     case 0xA9:
     {
         DWORD pct = dw32 ? dw32 : (DWORD)bVal;
-        _snprintf(szMain, sizeof(szMain), "%lu%%  остаток ресурса SSD", (unsigned long)pct);
+        safe_snprintf(szMain, "%lu%%  остаток ресурса SSD", (unsigned long)pct);
         break;
     }
 
+    case 0xB1:
+        if (eVendor == VENDOR_SAMSUNG && bVal <= 100) {
+            safe_snprintf(szMain, "износ/остаток %u%%", (unsigned)bVal);
+            break;
+        }
+        if (qw48 > 0xFFFFFFFFULL)
+            safe_snprintf(szMain, "%llu", (unsigned long long)qw48);
+        else
+            safe_snprintf(szMain, "%lu", (unsigned long)dw32);
+        break;
+
+    case 0xCA:
+        if (eVendor == VENDOR_MICRON && bVal <= 100) {
+            safe_snprintf(szMain, "%u%% ресурса", (unsigned)bVal);
+            break;
+        }
+        if (qw48 > 0xFFFFFFFFULL)
+            safe_snprintf(szMain, "%llu", (unsigned long long)qw48);
+        else
+            safe_snprintf(szMain, "%lu", (unsigned long)dw32);
+        break;
+
     case 0xAD:
-        _snprintf(szMain, sizeof(szMain), "%lu циклов выравнивания", (unsigned long)dw32);
+        if (eVendor == VENDOR_MICRON)
+            safe_snprintf(szMain, "%lu среднее стираний", (unsigned long)dw32);
+        else
+            safe_snprintf(szMain, "%lu циклов выравнивания", (unsigned long)dw32);
         break;
 
     case 0xAB:
@@ -1983,43 +1674,96 @@ static void FormatSmartValue(BYTE bID, BYTE* pRaw,
     case 0xB6:
     case 0xB0:
         if (dw32 == 0)
-            _snprintf(szMain, sizeof(szMain), "0 сбоев  (ОК)");
+            safe_snprintf(szMain, "0 сбоев  (ОК)");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu сбоев  (!)", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu сбоев  (!)", (unsigned long)dw32);
         break;
 
     case 0xAA:
-    case 0xE8:
     {
         DWORD pct = dw32 ? dw32 : (DWORD)bVal;
-        _snprintf(szMain, sizeof(szMain), "%lu%%  резервное пространство", (unsigned long)pct);
+        if (eVendor == VENDOR_INTEL && bVal <= 100)
+            pct = (DWORD)bVal;
+        safe_snprintf(szMain, "%lu%%  резервное пространство", (unsigned long)pct);
+        break;
+    }
+
+    case 0xE8:
+    {
+        if (eVendor == VENDOR_INTEL && bVal <= 100) {
+            safe_snprintf(szMain, "%u%%  резервное пространство", (unsigned)bVal);
+            break;
+        }
+        DWORD pct = dw32 ? dw32 : (DWORD)bVal;
+        safe_snprintf(szMain, "%lu%%  резервное пространство", (unsigned long)pct);
         break;
     }
 
     case 0xF0:
-        _snprintf(szMain, sizeof(szMain), "%lu ч полёта головок", (unsigned long)(DWORD)w16);
+        safe_snprintf(szMain, "%lu ч полёта головок", (unsigned long)(DWORD)w16);
+        break;
+
+    case 0xE1:
+        if (eVendor == VENDOR_INTEL) {
+            unsigned __int64 nGiB = ((unsigned __int64)dw32 * 32ULL) / 1024ULL;
+            if (nGiB >= 1024ULL)
+                safe_snprintf(szMain, "%lu единиц (32 MiB)  (~%llu TB)",
+                              (unsigned long)dw32, (unsigned long long)(nGiB / 1024ULL));
+            else
+                safe_snprintf(szMain, "%lu единиц (32 MiB)  (~%llu GiB)",
+                              (unsigned long)dw32, (unsigned long long)nGiB);
+            break;
+        }
+        safe_snprintf(szMain, "%lu", (unsigned long)dw32);
+        break;
+
+    case 0xE2:
+        if (eVendor == VENDOR_INTEL)
+            safe_snprintf(szMain, "%lu ч нагрузки", (unsigned long)dw32);
+        else
+            safe_snprintf(szMain, "%lu", (unsigned long)dw32);
+        break;
+
+    case 0xF6:
+        if (eVendor == VENDOR_MICRON) {
+            unsigned __int64 nLBA = qw48;
+            unsigned __int64 nGB  = nLBA / (1024ULL * 1024ULL * 2ULL);
+            if (nGB >= 1024)
+                safe_snprintf(szMain, "%llu LBA  (~%llu TB)", (unsigned long long)nLBA, (unsigned long long)(nGB / 1024ULL));
+            else if (nGB > 0)
+                safe_snprintf(szMain, "%llu LBA  (~%llu GB)", (unsigned long long)nLBA, (unsigned long long)nGB);
+            else
+                safe_snprintf(szMain, "%llu LBA", (unsigned long long)nLBA);
+            break;
+        }
+        if (qw48 > 0xFFFFFFFFULL)
+            safe_snprintf(szMain, "%llu", (unsigned long long)qw48);
+        else
+            safe_snprintf(szMain, "%lu", (unsigned long)dw32);
         break;
 
     default:
         if (qw48 > 0xFFFFFFFFULL)
-            _snprintf(szMain, sizeof(szMain), "%llu", qw48);
+            safe_snprintf(szMain, "%llu", (unsigned long long)qw48);
         else if (dw32 == 0)
-            _snprintf(szMain, sizeof(szMain), "0");
+            safe_snprintf(szMain, "0");
         else
-            _snprintf(szMain, sizeof(szMain), "%lu", (unsigned long)dw32);
+            safe_snprintf(szMain, "%lu", (unsigned long)dw32);
         break;
     }
 
-    _snprintf(szBuf, nBufLen, "%s", szMain);
+    safe_snprintf_n(szBuf, nBufLen, "%s", szMain);
 }
 
 static void FormatSmartRaw(BYTE bID, BYTE* pRaw,
                            BYTE bVal, BYTE bWorst, BYTE bThresh,
+                           DRIVE_VENDOR eVendor, DRIVE_TYPE eType,
                            char* szBuf, int nBufLen)
 {
     char szDec[80];
-    FormatSmartValue(bID, pRaw, bVal, bWorst, bThresh, szDec, sizeof(szDec));
-    _snprintf(szBuf, nBufLen, "%02X%02X%02X%02X%02X%02X (%s)",
+    FormatSmartValue(bID, pRaw, bVal, bWorst, bThresh,
+                     eVendor, eType, szDec, sizeof(szDec));
+    safe_snprintf_n(szBuf, nBufLen, "%02X%02X%02X%02X%02X%02X (%s)",
               pRaw[5], pRaw[4], pRaw[3], pRaw[2], pRaw[1], pRaw[0], szDec);
 }
 
@@ -2042,7 +1786,7 @@ void UpdateAttrList(HWND hWnd, int nDriveIdx)
     DRIVE_INFO* pInfo = &g_Drives[nDriveIdx];
 
     if (pInfo->bIsUSB && !pInfo->bSMART_Supported) {
-        const char* msg = IsLikelyUsbFlash(pInfo)
+        const char* msg = IsLikelyUsbFlashDrive(pInfo)
             ? "У этой USB-флешки SMART не отдаётся — так у большинства флешек."
             : "USB-корпус/мост не отдаёт SMART";
         AttrRowSet(&rows[0], "--", msg, "", "—", "—", "", "");
@@ -2050,7 +1794,7 @@ void UpdateAttrList(HWND hWnd, int nDriveIdx)
     }
     else if (pInfo->bIsNVMe && !pInfo->bSMART_Supported) {
         char szErr[64];
-        _snprintf(szErr, sizeof(szErr), "Win32 %lu", pInfo->dwErrNvmeProtocol);
+        safe_snprintf(szErr, "Win32 %lu", (unsigned long)pInfo->dwErrNvmeProtocol);
         AttrRowSet(&rows[0], "--", "NVMe Health Log IOCTL не удался",
                    szErr, "—", "—", "", "");
         AttrRowSet(&rows[1], "--", "5=нет прав  1/50=нет в драйвере  87=параметр",
@@ -2079,21 +1823,21 @@ void UpdateAttrList(HWND hWnd, int nDriveIdx)
         char szDUR[64], szDUW[64], szPOH[32], szPC[32];
         char szUS[32], szME[32], szEL[32], szWCT[32], szCCT[32];
 
-        if (pLog->CriticalWarning == 0) _snprintf(szCrit, sizeof(szCrit), "0 (нет)");
-        else _snprintf(szCrit, sizeof(szCrit), "0x%02X (!)", pLog->CriticalWarning);
+        if (pLog->CriticalWarning == 0) safe_snprintf(szCrit, "0 (нет)");
+        else safe_snprintf(szCrit, "0x%02X (!)", pLog->CriticalWarning);
         NVME_ROW("01h","Критическое предупреждение",szCrit,(pLog->CriticalWarning?"ПЛОХО":"ОК"));
 
-        _snprintf(szVBuf,sizeof(szVBuf),"%d C (%d K)",nTempC,(int)wTempK);
+        safe_snprintf(szVBuf,"%d C (%d K)",nTempC,(int)wTempK);
         NVME_ROW("02h","Температура",szVBuf,(nTempC>70?"Жарко":"ОК"));
 
-        _snprintf(szSpare,sizeof(szSpare),"%d %%",(int)pLog->AvailableSpare);
+        safe_snprintf(szSpare,"%d %%",(int)pLog->AvailableSpare);
         NVME_ROW("03h","Запас блоков",szSpare,
             (pLog->AvailableSpare<pLog->AvailableSpareThreshold?"ПЛОХО":"ОК"));
 
-        _snprintf(szSpTh,sizeof(szSpTh),"%d %%",(int)pLog->AvailableSpareThreshold);
+        safe_snprintf(szSpTh,"%d %%",(int)pLog->AvailableSpareThreshold);
         NVME_ROW("04h","Порог запаса блоков",szSpTh,"--");
 
-        _snprintf(szPctU,sizeof(szPctU),"%d %%",(int)pLog->PercentageUsed);
+        safe_snprintf(szPctU,"%d %%",(int)pLog->PercentageUsed);
         NVME_ROW("05h","Износ",szPctU,
             (pLog->PercentageUsed>=100?"ПЛОХО":"ОК"));
 
@@ -2103,34 +1847,34 @@ void UpdateAttrList(HWND hWnd, int nDriveIdx)
         FormatNvmeHostBytes(qwDataWritten, szDUW, sizeof(szDUW));
         NVME_ROW("07h","Записано (host)",szDUW,"ОК");
 
-        _snprintf(szPOH,sizeof(szPOH),"%llu ч",qwPOH);
+        safe_snprintf(szPOH,"%llu ч",(unsigned long long)qwPOH);
         NVME_ROW("09h","Часы работы",szPOH,"ОК");
 
-        _snprintf(szPC,sizeof(szPC),"%llu",qwPowerCycles);
+        safe_snprintf(szPC,"%llu",(unsigned long long)qwPowerCycles);
         NVME_ROW("0Ch","Циклы включения",szPC,"ОК");
 
-        _snprintf(szUS,sizeof(szUS),"%llu",qwUnsafeSDs);
+        safe_snprintf(szUS,"%llu",(unsigned long long)qwUnsafeSDs);
         NVME_ROW("10h","Аварийные выключения",szUS,"ОК");
 
-        _snprintf(szME,sizeof(szME),"%llu",qwMediaErr);
+        safe_snprintf(szME,"%llu",(unsigned long long)qwMediaErr);
         NVME_ROW("11h","Ошибки носителя",szME,(qwMediaErr>0?"ПЛОХО":"ОК"));
 
-        _snprintf(szEL,sizeof(szEL),"%llu",qwErrLog);
+        safe_snprintf(szEL,"%llu",(unsigned long long)qwErrLog);
         NVME_ROW("12h","Записи в журнале ошибок",szEL,(qwErrLog>0?"ПЛОХО":"ОК"));
 
-        _snprintf(szWCT,sizeof(szWCT),"%lu мин",pLog->WarningCompTempTime);
+        safe_snprintf(szWCT,"%lu мин",(unsigned long)pLog->WarningCompTempTime);
         NVME_ROW("13h","Время при высокой температуре",szWCT,(pLog->WarningCompTempTime>0?"ПЛОХО":"ОК"));
 
-        _snprintf(szCCT,sizeof(szCCT),"%lu мин",pLog->CriticalCompTempTime);
+        safe_snprintf(szCCT,"%lu мин",(unsigned long)pLog->CriticalCompTempTime);
         NVME_ROW("14h","Время при критической температуре",szCCT,(pLog->CriticalCompTempTime>0?"ПЛОХО":"ОК"));
 
         {
             char szHR[64], szHW[64], szBT[64];
-            _snprintf(szHR, sizeof(szHR), "%llu", pInfo->qwNVMeHostReads);
+            safe_snprintf(szHR, "%llu", (unsigned long long)pInfo->qwNVMeHostReads);
             NVME_ROW("--", "Команды чтения хоста", szHR, "ОК");
-            _snprintf(szHW, sizeof(szHW), "%llu", pInfo->qwNVMeHostWrites);
+            safe_snprintf(szHW, "%llu", (unsigned long long)pInfo->qwNVMeHostWrites);
             NVME_ROW("--", "Команды записи хоста", szHW, "ОК");
-            _snprintf(szBT, sizeof(szBT), "%llu мин", pInfo->qwNVMeControllerBusyTime);
+            safe_snprintf(szBT, "%llu мин", (unsigned long long)pInfo->qwNVMeControllerBusyTime);
             NVME_ROW("--", "Занятость контроллера", szBT, "ОК");
         }
         {
@@ -2138,9 +1882,9 @@ void UpdateAttrList(HWND hWnd, int nDriveIdx)
             for (ts = 0; ts < 8; ts++) {
                 if (pInfo->nTempSensor[ts] >= 0) {
                     char szId[8], szName[48], szVal[32];
-                    _snprintf(szId, sizeof(szId), "T%d", ts + 1);
-                    _snprintf(szName, sizeof(szName), "Датчик температуры %d", ts + 1);
-                    _snprintf(szVal, sizeof(szVal), "%d C", pInfo->nTempSensor[ts]);
+                    safe_snprintf(szId, "T%d", ts + 1);
+                    safe_snprintf(szName, "Датчик температуры %d", ts + 1);
+                    safe_snprintf(szVal, "%d C", pInfo->nTempSensor[ts]);
                     NVME_ROW(szId, szName, szVal,
                              (pInfo->nTempSensor[ts] > 70 ? "Жарко" : "ОК"));
                 }
@@ -2148,22 +1892,22 @@ void UpdateAttrList(HWND hWnd, int nDriveIdx)
         }
         if (pLog->ThermalMgmtTemp1TransCnt) {
             char sz[32];
-            _snprintf(sz, sizeof(sz), "%lu", pLog->ThermalMgmtTemp1TransCnt);
+            safe_snprintf(sz, "%lu", (unsigned long)pLog->ThermalMgmtTemp1TransCnt);
             NVME_ROW("--", "Thermal Mgmt T1 переходов", sz, "ОК");
         }
         if (pLog->ThermalMgmtTemp2TransCnt) {
             char sz[32];
-            _snprintf(sz, sizeof(sz), "%lu", pLog->ThermalMgmtTemp2TransCnt);
+            safe_snprintf(sz, "%lu", (unsigned long)pLog->ThermalMgmtTemp2TransCnt);
             NVME_ROW("--", "Thermal Mgmt T2 переходов", sz, "ОК");
         }
         if (pLog->TotalTimeThermalMgmtTemp1) {
             char sz[32];
-            _snprintf(sz, sizeof(sz), "%lu с", pLog->TotalTimeThermalMgmtTemp1);
+            safe_snprintf(sz, "%lu с", (unsigned long)pLog->TotalTimeThermalMgmtTemp1);
             NVME_ROW("--", "Thermal Mgmt T1 время", sz, "ОК");
         }
         if (pLog->TotalTimeThermalMgmtTemp2) {
             char sz[32];
-            _snprintf(sz, sizeof(sz), "%lu с", pLog->TotalTimeThermalMgmtTemp2);
+            safe_snprintf(sz, "%lu с", (unsigned long)pLog->TotalTimeThermalMgmtTemp2);
             NVME_ROW("--", "Thermal Mgmt T2 время", sz, "ОК");
         }
 
@@ -2186,14 +1930,15 @@ void UpdateAttrList(HWND hWnd, int nDriveIdx)
             const char* szStat;
             char szVal[16], szWorst[16], szThresh[16], szRaw[128];
 
-            _snprintf(szVal, sizeof(szVal), "%u", (unsigned)pAttr->bAttrValue);
-            _snprintf(szWorst, sizeof(szWorst), "%u", (unsigned)pAttr->bWorstValue);
+            safe_snprintf(szVal, "%u", (unsigned)pAttr->bAttrValue);
+            safe_snprintf(szWorst, "%u", (unsigned)pAttr->bWorstValue);
             if (bThresh)
-                _snprintf(szThresh, sizeof(szThresh), "%u", (unsigned)bThresh);
+                safe_snprintf(szThresh, "%u", (unsigned)bThresh);
             else
-                _snprintf(szThresh, sizeof(szThresh), "—");
+                safe_snprintf(szThresh, "—");
             FormatSmartRaw(pAttr->bAttrID, pAttr->bRawValue,
                            pAttr->bAttrValue, pAttr->bWorstValue, bThresh,
+                           pInfo->eVendor, pInfo->eType,
                            szRaw, 128);
             if (bFailed)
                 szStat = "СБОЙ";
@@ -2204,8 +1949,8 @@ void UpdateAttrList(HWND hWnd, int nDriveIdx)
 
             {
                 char szId[8];
-                _snprintf(szId, sizeof(szId), "%02Xh", pAttr->bAttrID);
-                AttrRowSet(&rows[nDesired++], szId, GetAttrName(pAttr->bAttrID),
+                safe_snprintf(szId, "%02Xh", pAttr->bAttrID);
+                AttrRowSet(&rows[nDesired++], szId, GetAttrNameEx(pAttr->bAttrID, pInfo->eVendor, pInfo->eType),
                            szVal, szWorst, szThresh, szRaw, szStat);
             }
         }
@@ -2221,9 +1966,9 @@ void UpdateAttrList(HWND hWnd, int nDriveIdx)
             if (nDesired < MAX_ATTR_ROWS) {
                 char szT[32];
                 if (pInfo->nTemperatureC > 0)
-                    _snprintf(szT, sizeof(szT), "%d C", pInfo->nTemperatureC);
+                    safe_snprintf(szT, "%d C", pInfo->nTemperatureC);
                 else
-                    _snprintf(szT, sizeof(szT), "Нет данных");
+                    safe_snprintf(szT, "Нет данных");
                 AttrRowSet(&rows[nDesired++], "--", "Температура (SCSI Log Sense)",
                            szT, "—", "—", "", "--");
             }
@@ -2238,18 +1983,18 @@ void UpdateAttrList(HWND hWnd, int nDriveIdx)
         /* Extra ATA info already collected in AcquireATASMART — display only. */
         if (nDesired < MAX_ATTR_ROWS && pInfo->wRotationRate >= 0x0401) {
             char sz[32];
-            _snprintf(sz, sizeof(sz), "%u об/мин", (unsigned)pInfo->wRotationRate);
+            safe_snprintf(sz, "%u об/мин", (unsigned)pInfo->wRotationRate);
             AttrRowSet(&rows[nDesired++], "--", "Обороты", sz, "—", "—", "", "ОК");
         }
         if (nDesired < MAX_ATTR_ROWS && pInfo->bGotErrorLog) {
             char sz[32];
-            _snprintf(sz, sizeof(sz), "%d", pInfo->nErrorLogCount);
+            safe_snprintf(sz, "%d", pInfo->nErrorLogCount);
             AttrRowSet(&rows[nDesired++], "--", "Журнал ошибок SMART", sz, "—", "—", "",
                        pInfo->nErrorLogCount > 0 ? "Внимание" : "ОК");
         }
         if (nDesired < MAX_ATTR_ROWS && pInfo->bGotSelfTestLog) {
             char sz[32];
-            _snprintf(sz, sizeof(sz), "%d", pInfo->nSelfTestStatus);
+            safe_snprintf(sz, "%d", pInfo->nSelfTestStatus);
             AttrRowSet(&rows[nDesired++], "--", "Журнал самопроверки", sz, "—", "—", "", "ОК");
         }
     }
@@ -2301,7 +2046,6 @@ static volatile LONG g_bScanBusy = 0;
  * never races with ScanDrives' ZeroMemory of live slots. */
 static DRIVE_INFO g_ScanBuf[MAX_DRIVES];
 static int        g_nScanBufCount;
-static BOOL       g_bMeasuredSpeedOnce;
 
 static volatile BOOL g_bFullScanRequested = TRUE;
 
@@ -2364,9 +2108,11 @@ void RefreshData(HWND hWnd, BOOL bFull)
 
 /* Control identifiers used inside the About dialog. */
 #define IDC_ABOUT_LINK       3500
-#define IDC_ABOUT_LIC_STATUS 3501   
-#define IDC_ABOUT_ACTIVATE   3502   
-#define ABOUT_URL       "https://github.com/sponsors/arisohandriputra/"
+#define IDC_ABOUT_LIC_STATUS 3501
+#define IDC_ABOUT_ACTIVATE   3502
+
+#define PROP_ABOUT_FONT_BOLD  "dmFntB"
+#define PROP_ABOUT_FONT_LINK  "dmFntL"
 
 static HCURSOR s_hCursorHand = NULL;
 
@@ -2389,7 +2135,8 @@ static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
             HFONT hFontBold = CreateFontA(-15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-            HWND hName = CreateWindowExU8(0, "STATIC", "HDDHealth Monitor",
+            SetPropA(hDlg, PROP_ABOUT_FONT_BOLD, (HANDLE)hFontBold);
+            HWND hName = CreateWindowExU8(0, "STATIC", "DriveMonitor",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
                 20, 58, cx - 40, 22,
                 hDlg, (HMENU)0, g_hInst, NULL);
@@ -2408,14 +2155,14 @@ static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
                 hDlg, (HMENU)0, g_hInst, NULL);
 
             HWND hCopy = CreateWindowExU8(0, "STATIC",
-                "Copyright \xC2\xA9 2026 ARImetic Inc. All Rights Reserved.",
+                "\xC2\xA9 2026 chuikoff",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
                 20, 118, cx - 40, 18,
                 hDlg, (HMENU)0, g_hInst, NULL);
             SendMessageA(hCopy, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
             HWND hDrv = CreateWindowExU8(0, "STATIC",
-                "Author: Ari Sohandri Putra -  Open Source / MIT License",
+                "Автор: chuikoff — MIT License",
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
                 20, 140, cx - 40, 18,
                 hDlg, (HMENU)0, g_hInst, NULL);
@@ -2428,7 +2175,7 @@ static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
 
             {
                 HWND hLicStatus = CreateWindowExU8(0, "STATIC",
-                    "Free Open Source Software",
+                    "Свободное ПО с открытым исходным кодом",
                     WS_CHILD | WS_VISIBLE | SS_CENTER,
                     20, 176, cx - 40, 18,
                     hDlg, (HMENU)IDC_ABOUT_LIC_STATUS, g_hInst, NULL);
@@ -2449,8 +2196,9 @@ static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
             HFONT hFontLink = CreateFontA(-12, 0, 0, 0, FW_NORMAL, FALSE, TRUE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+            SetPropA(hDlg, PROP_ABOUT_FONT_LINK, (HANDLE)hFontLink);
             HWND hLink = CreateWindowExU8(0, "STATIC",
-                "Sponsor this project on GitHub",
+                DONATE_URL,
                 WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOTIFY,
                 20, 244, cx - 40, 18,
                 hDlg, (HMENU)IDC_ABOUT_LINK, g_hInst, NULL);
@@ -2474,6 +2222,10 @@ static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
         else if (LOWORD(wParam) == IDC_ABOUT_ACTIVATE) {
             Donate_OpenSponsorsPage(hDlg);
         }
+        else if (LOWORD(wParam) == IDC_ABOUT_LINK &&
+                 HIWORD(wParam) == STN_CLICKED) {
+            Donate_OpenSponsorsPage(hDlg);
+        }
         return 0;
 
     case WM_NOTIFY:
@@ -2486,7 +2238,7 @@ static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
             HDC  hdcSt = (HDC)wParam;
             SetBkMode(hdcSt, TRANSPARENT);
             if (nID == IDC_ABOUT_LINK) {
-                /* Sponsor link - render in hyperlink blue. */
+                /* Boosty link - render in hyperlink blue. */
                 SetTextColor(hdcSt, RGB(0, 102, 204));
             } else if (nID == IDC_ABOUT_LIC_STATUS) {
                 /* FOSS banner - render in green to signal "free / good". */
@@ -2497,7 +2249,6 @@ static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
 
     case WM_SETCURSOR:
         {
-
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(hDlg, &pt);
@@ -2518,17 +2269,18 @@ static LRESULT CALLBACK AboutDlgProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
     case WM_CLOSE:
         DestroyWindow(hDlg);
         return 0;
-    }
 
-    if (uMsg == WM_COMMAND &&
-        LOWORD(wParam) == IDC_ABOUT_LINK &&
-        HIWORD(wParam) == STN_CLICKED) {
-        /* Sponsor link clicked - open the GitHub Sponsors page. */
-        Donate_OpenSponsorsPage(hDlg);
+    case WM_DESTROY:
+        {
+            HFONT hBold = (HFONT)GetPropA(hDlg, PROP_ABOUT_FONT_BOLD);
+            HFONT hLink = (HFONT)GetPropA(hDlg, PROP_ABOUT_FONT_LINK);
+            if (hBold) { DeleteObject(hBold); RemovePropA(hDlg, PROP_ABOUT_FONT_BOLD); }
+            if (hLink) { DeleteObject(hLink); RemovePropA(hDlg, PROP_ABOUT_FONT_LINK); }
+        }
         return 0;
     }
 
-    return DefWindowProcA(hDlg, uMsg, wParam, lParam);
+    return DefWindowProc(hDlg, uMsg, wParam, lParam);
 }
 
 void ShowAboutDialog(HWND hWndParent)
@@ -2536,15 +2288,15 @@ void ShowAboutDialog(HWND hWndParent)
 
     static BOOL bRegistered = FALSE;
     if (!bRegistered) {
-        WNDCLASSA wc;
+        WNDCLASSW wc;
         ZeroMemory(&wc, sizeof(wc));
         wc.lpfnWndProc   = AboutDlgProc;
         wc.hInstance     = g_hInst;
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.hCursor       = LoadCursorA(NULL, (LPCSTR)IDC_ARROW);
-        wc.hIcon         = LoadIconA(g_hInst, MAKEINTRESOURCEA(IDI_APPICON));
-        wc.lpszClassName = "LLHDAboutDlg";
-        RegisterClassA(&wc);
+        wc.hCursor       = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+        wc.hIcon         = LoadIconW(g_hInst, MAKEINTRESOURCEW(IDI_APPICON));
+        wc.lpszClassName = L"LLHDAboutDlg";
+        RegisterClassW(&wc);
         bRegistered = TRUE;
     }
 
@@ -2574,7 +2326,7 @@ void ShowAboutDialog(HWND hWndParent)
     HWND hDlg = CreateWindowExU8(
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
         "LLHDAboutDlg",
-        "About HDDHealth Monitor",
+        "О программе — DriveMonitor",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
         nX, nY, nWinW, nWinH,
         hWndParent, NULL, g_hInst, NULL
@@ -2760,8 +2512,8 @@ void CreateControls(HWND hWnd)
 
     SendMessage(hPred, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
 
-    HWND hList = CreateWindowExW(
-        WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+    HWND hList = CreateWindowExU8(
+        WS_EX_CLIENTEDGE, "SysListView32", "",
         WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
         nRightX, 265, 540, 340,
         hWnd, (HMENU)IDC_ATTR_LIST, g_hInst, NULL
@@ -2815,10 +2567,18 @@ static LRESULT HandleCtlColor(HWND hWnd, WPARAM wParam)
         if (id == IDC_MODEL_LABEL    || id == IDC_SERIAL_LABEL   ||
             id == IDC_FIRMWARE_LABEL || id == IDC_SIZE_LABEL      ||
             id == IDC_TEMP_LABEL     || id == IDC_STATUS_LABEL    ||
-            id == IDC_READ_SPEED_LABEL || id == IDC_ADAPTER_LABEL) {
-            SetTextColor(hdc, CLR_TEXT_DIM);
-            SetBkColor(hdc, CLR_BG);
-            return (LRESULT)g_hbrBG;
+            id == IDC_READ_SPEED_LABEL || id == IDC_ADAPTER_LABEL ||
+            id == IDC_MODEL_STATIC   || id == IDC_SERIAL_STATIC   ||
+            id == IDC_FIRMWARE_STATIC|| id == IDC_SIZE_STATIC     ||
+            id == IDC_TEMP_STATIC    || id == IDC_STATUS_STATIC    ||
+            id == IDC_READ_SPEED_STATIC || id == IDC_ADAPTER_STATIC) {
+            BOOL bLabel = (id == IDC_MODEL_LABEL || id == IDC_SERIAL_LABEL ||
+                           id == IDC_FIRMWARE_LABEL || id == IDC_SIZE_LABEL ||
+                           id == IDC_TEMP_LABEL || id == IDC_STATUS_LABEL ||
+                           id == IDC_READ_SPEED_LABEL || id == IDC_ADAPTER_LABEL);
+            SetTextColor(hdc, bLabel ? CLR_TEXT_DIM : CLR_TEXT);
+            SetBkColor(hdc, CLR_PANEL);
+            return (LRESULT)g_hbrPanel;
         }
     }
     SetTextColor(hdc, CLR_TEXT);
@@ -2832,14 +2592,14 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
     case WM_CREATE:
         g_hMainWnd = hWnd;
+        ApplyGlassFrame(hWnd);
         RegisterHealthBarClass(g_hInst);
         CreateGDIObjects();
         CreateMenuBar(hWnd);
         CreateControls(hWnd);
         /* No tray: close exits, no background monitoring. */
         DeviceNotify_Register(hWnd);
-        /* No IDT_REFRESH: SMART is read once at create and on hotplug.
-         * User wants to look at SMART, not monitor it. */
+        /* SMART is read once at create and on hotplug — no periodic refresh. */
 
         UpdateWindowTitle(hWnd);
         RefreshData(hWnd, TRUE);
@@ -2855,6 +2615,21 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             RECT rc;
             GetClientRect(hWnd, &rc);
             FillRect(hdc, &rc, g_hbrBG);
+
+            /* Info-side frosted panel (RoundRect + light border). */
+            {
+                int nRightX = DRIVE_BTN_PANEL_W + 10;
+                int nBarsW  = 190;
+                int nInfoX  = nRightX + nBarsW + 10;
+                RECT rcInfo;
+                rcInfo.left   = nInfoX - 8;
+                rcInfo.top    = 28;
+                rcInfo.right  = rc.right - 6;
+                rcInfo.bottom = 28 + 8 * 22 + 10;
+                HPEN hp = CreatePen(PS_SOLID, 1, CLR_BORDER);
+                DrawRoundRect(hdc, &rcInfo, 10, g_hbrPanel, hp);
+                DeleteObject(hp);
+            }
         }
         return 1;
 
@@ -2878,6 +2653,42 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             NMHDR* pHdr = (NMHDR*)lParam;
             /* Status badge for col 6 only. Code comes from lItemlParam
              * (set at fill time). Never LVM_GETITEM / CreateFont here. */
+            {
+                HWND hList = GetDlgItem(hWnd, IDC_ATTR_LIST);
+                HWND hHdr  = hList ? ListView_GetHeader(hList) : NULL;
+                if (hHdr && pHdr->hwndFrom == hHdr && pHdr->code == NM_CUSTOMDRAW) {
+                    NMCUSTOMDRAW* pCD = (NMCUSTOMDRAW*)lParam;
+                    if (pCD->dwDrawStage == CDDS_PREPAINT)
+                        return CDRF_NOTIFYITEMDRAW;
+                    if (pCD->dwDrawStage == CDDS_ITEMPREPAINT) {
+                        HDC hdc = pCD->hdc;
+                        HBRUSH hbr = CreateSolidBrush(CLR_HEADER);
+                        FillRect(hdc, &pCD->rc, hbr);
+                        DeleteObject(hbr);
+                        HPEN hp = CreatePen(PS_SOLID, 1, CLR_BORDER);
+                        HPEN hpOld = (HPEN)SelectObject(hdc, hp);
+                        MoveToEx(hdc, pCD->rc.left, pCD->rc.bottom - 1, NULL);
+                        LineTo(hdc, pCD->rc.right, pCD->rc.bottom - 1);
+                        SelectObject(hdc, hpOld);
+                        DeleteObject(hp);
+                        WCHAR wz[64];
+                        HDITEMW hi;
+                        ZeroMemory(&hi, sizeof(hi));
+                        hi.mask = HDI_TEXT;
+                        hi.pszText = wz;
+                        hi.cchTextMax = 64;
+                        SendMessageW(hHdr, HDM_GETITEMW, pCD->dwItemSpec, (LPARAM)&hi);
+                        SetBkMode(hdc, TRANSPARENT);
+                        SetTextColor(hdc, CLR_TEXT);
+                        RECT rcT = pCD->rc;
+                        rcT.left += 6;
+                        DrawTextW(hdc, wz, -1, &rcT,
+                                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                        return CDRF_SKIPDEFAULT;
+                    }
+                    return CDRF_DODEFAULT;
+                }
+            }
             if (pHdr->idFrom == IDC_ATTR_LIST && pHdr->code == NM_CUSTOMDRAW) {
                 NMLVCUSTOMDRAW* pCD = (NMLVCUSTOMDRAW*)lParam;
                 switch (pCD->nmcd.dwDrawStage) {
@@ -2970,32 +2781,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         }
         return 0;
 
-    case WM_TRAYICON:
-        {
-            int nClickedDrive = (int)(wParam - IDI_TRAY);
-            if (nClickedDrive < 0 || nClickedDrive >= MAX_DRIVES)
-                nClickedDrive = 0;
-
-            if (lParam == WM_LBUTTONDBLCLK) {
-                ShowWindow(hWnd, SW_RESTORE);
-                SetForegroundWindow(hWnd);
-                g_bMinToTray = FALSE;
-                if (nClickedDrive < g_nDriveCount) {
-                    g_nSelectedDrive = nClickedDrive;
-                    int i;
-                    for (i = 0; i < g_nDriveCount; i++)
-                        if (g_hDriveBtn[i]) InvalidateRect(g_hDriveBtn[i], NULL, TRUE);
-                    UpdateDriveInfo(hWnd, nClickedDrive);
-                    UpdateAttrList(hWnd, nClickedDrive);
-                    InvalidateRect(hWnd, NULL, FALSE);
-                    UpdateWindow(hWnd);
-                }
-            } else if (lParam == WM_RBUTTONUP) {
-                TrayIcon_ShowContextMenu(hWnd);
-            }
-        }
-        return 0;
-
     case WM_DEVICECHANGE:
         if (wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE) {
             KillTimer(hWnd, IDT_HOTPLUG);
@@ -3009,7 +2794,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         return 0;
 
     case WM_CLOSE:
-        TrayIcon_Remove();
         DestroyWindow(hWnd);
         return 0;
 
@@ -3036,11 +2820,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             else if (nCtrl == IDM_SCREENSHOT) {
                 DoSaveScreenshot(hWnd);
             }
-            else if (nCtrl == IDM_SHOW_WINDOW) {
-                ShowWindow(hWnd, SW_RESTORE);
-                SetForegroundWindow(hWnd);
-                g_bMinToTray = FALSE;
-            }
             else if (nCtrl == IDM_ABOUT) {
                 ShowAboutDialog(hWnd);
             }
@@ -3048,7 +2827,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 Donate_ShowDialog(hWnd);
             }
             else if (nCtrl == IDM_EXIT) {
-                TrayIcon_Remove();
                 DestroyWindow(hWnd);
             }
         }
@@ -3056,31 +2834,15 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
     case WM_APP_REFRESH_DONE:
         {
-            int i, j;
+            int i;
 
             /* Snapshot CURRENT g_Drives before replacing them. */
             Snapshot_Save();
 
-            /* Preserve previous read/write speeds when the new scan skipped
-             * them (serial match). */
-            for (i = 0; i < g_nScanBufCount; i++) {
-                if (g_ScanBuf[i].nReadSpeedMBs > 0) continue;
-                for (j = 0; j < g_nDriveCount; j++) {
-                    if (g_Drives[j].szSerial[0] &&
-                        strcmp(g_Drives[j].szSerial, g_ScanBuf[i].szSerial) == 0) {
-                        g_ScanBuf[i].nReadSpeedMBs  = g_Drives[j].nReadSpeedMBs;
-                        g_ScanBuf[i].nWriteSpeedMBs = g_Drives[j].nWriteSpeedMBs;
-                        break;
-                    }
-                }
-            }
-
             memcpy(g_Drives, g_ScanBuf, sizeof(DRIVE_INFO) * MAX_DRIVES);
             g_nDriveCount = g_nScanBufCount;
-            if (g_nDriveCount > 0) g_bMeasuredSpeedOnce = TRUE;
 
             Snapshot_Diff();
-            CheckCriticalAlerts();  /* tray balloon from UI thread */
 
             InterlockedExchange(&g_bScanBusy, 0);
             {
@@ -3095,7 +2857,6 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             UpdateDriveInfo(hWnd, g_nSelectedDrive);
             UpdateAttrList(hWnd, g_nSelectedDrive);
             RepaintHealthBar();
-            /* No tray icon — skip TrayIcon_Update (it would NIM_ADD). */
 
             for (i = 0; i < g_nDriveCount; i++)
                 if (g_hDriveBtn[i]) InvalidateRect(g_hDriveBtn[i], NULL, TRUE);
@@ -3209,15 +2970,12 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         return 0;
 
     case WM_DESTROY:
-        KillTimer(hWnd, IDT_REFRESH);
-        KillTimer(hWnd, IDT_TITLE_UPDATE);
         KillTimer(hWnd, IDT_HOTPLUG);
         DeviceNotify_Unregister();
-        TrayIcon_Remove();
         DestroyGDIObjects();
         if (g_gdiplusToken) { GdiplusShutdown(g_gdiplusToken); g_gdiplusToken = 0; }
         PostQuitMessage(0);
         return 0;
     }
-    return DefWindowProcA(hWnd, uMsg, wParam, lParam);
+    return DefWindowProc(hWnd, uMsg, wParam, lParam);
 }

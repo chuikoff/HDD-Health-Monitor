@@ -29,6 +29,10 @@
 #endif
 
 #define WIN32_LEAN_AND_MEAN
+#ifndef UNICODE
+#define UNICODE
+#define _UNICODE
+#endif
 #include <windows.h>
 #include <shellapi.h>
 #include <commctrl.h>
@@ -40,11 +44,12 @@
 #include "resource.h"
 #include "donate.h"
 #include "utf8ui.h"
+#include "safestr.h"
 
 /* A globally-named mutex prevents the user from accidentally launching
    multiple instances of the monitor.  The "Global\" prefix makes the
    mutex visible across all terminal-server sessions. */
-#define MUTEX_NAME  "Global\\HDDHealth_SingleInstance_v1"
+#define MUTEX_NAME  "Global\\DriveMonitor_SingleInstance"
 
 /* ------------------------------------------------------------------ */
 /*  Single-instance helpers                                           */
@@ -94,7 +99,7 @@ static void BringExistingWindowToFront(void)
 /* ------------------------------------------------------------------ */
 
 /* Tiny crash log: no MessageBox (can deadlock in a crash). Writes
-   %TEMP%\HDDHealthMonitor_crash.txt, else next to the exe. */
+   %TEMP%\DriveMonitor_crash.txt, else next to the exe. */
 static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
 {
     char dir[MAX_PATH];
@@ -102,7 +107,7 @@ static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
     FILE* f = NULL;
     DWORD n = GetTempPathA(MAX_PATH, dir);
     if (n && n < MAX_PATH) {
-        _snprintf(path, sizeof(path), "%sHDDHealthMonitor_crash.txt", dir);
+        safe_snprintf(path, "%sDriveMonitor_crash.txt", dir);
         f = fopen(path, "w");
     }
     if (!f && GetModuleFileNameA(NULL, dir, MAX_PATH)) {
@@ -110,7 +115,7 @@ static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
         if (!slash) slash = strrchr(dir, '/');
         if (slash) {
             slash[1] = '\0';
-            _snprintf(path, sizeof(path), "%sHDDHealthMonitor_crash.txt", dir);
+            safe_snprintf(path, "%sDriveMonitor_crash.txt", dir);
             f = fopen(path, "w");
         }
     }
@@ -156,21 +161,21 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     Donate_Startup(NULL);
 
     /* ---- Register the main window class --------------------------- */
-    WNDCLASSEXA wc;
+    WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize        = sizeof(wc);
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = MainWndProc;
     wc.hInstance     = hInstance;
-    wc.hCursor       = LoadCursorA(NULL, IDC_ARROW);
+    wc.hCursor       = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = "LLHDMonitorMainWnd";
-    wc.hIcon         = LoadIconA(hInstance, MAKEINTRESOURCEA(IDI_APPICON));
-    wc.hIconSm       = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_APPICON),
+    wc.lpszClassName = L"LLHDMonitorMainWnd";
+    wc.hIcon         = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APPICON));
+    wc.hIconSm       = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APPICON),
                                           IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
 
-    if (!RegisterClassExA(&wc)) {
-        MessageBoxA(NULL, "RegisterClassEx failed!", "Error", MB_ICONERROR);
+    if (!RegisterClassExW(&wc)) {
+        MessageBoxU8(NULL, "RegisterClassEx failed!", "Error", MB_ICONERROR);
         if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); }
         return 1;
     }
@@ -184,8 +189,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     HMENU hMenuBar  = CreateMenu();
     HMENU hMenuFile = CreatePopupMenu();
     HMENU hMenuHelp = CreatePopupMenu();
-    AppendMenuU8(hMenuFile, MF_STRING,    IDM_SHOW_WINDOW, "&Показать окно");
-    AppendMenuU8(hMenuFile, MF_SEPARATOR, 0,               NULL);
     AppendMenuU8(hMenuFile, MF_STRING,    IDM_EXIT,        "В&ыход");
     AppendMenuU8(hMenuHelp, MF_STRING,    IDM_DONATE,      "&Поддержать...");
     AppendMenuU8(hMenuHelp, MF_SEPARATOR, 0,               NULL);
@@ -193,17 +196,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     AppendMenuU8(hMenuBar,  MF_POPUP, (UINT_PTR)hMenuFile, "&Файл");
     AppendMenuU8(hMenuBar,  MF_POPUP, (UINT_PTR)hMenuHelp, "&Справка");
 
-    HWND hWnd = CreateWindowExA(
+    HWND hWnd = CreateWindowExU8(
         0,
         "LLHDMonitorMainWnd",
-        "HDDHealth Monitor 1.1",
+        "DriveMonitor",
         WS_OVERLAPPEDWINDOW,
         nX, nY, WINDOW_W, WINDOW_H,
         NULL, hMenuBar, hInstance, NULL
     );
 
     if (!hWnd) {
-        MessageBoxA(NULL, "CreateWindow failed!", "Error", MB_ICONERROR);
+        MessageBoxU8(NULL, "CreateWindow failed!", "Error", MB_ICONERROR);
         if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); }
         return 1;
     }
@@ -216,9 +219,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* ---- Standard Win32 message loop ------------------------------ */
     MSG msg;
     ZeroMemory(&msg, sizeof(msg));
-    while (GetMessageA(&msg, NULL, 0, 0)) {
+    while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
-        DispatchMessageA(&msg);
+        DispatchMessage(&msg);
     }
 
     if (hMutex) {

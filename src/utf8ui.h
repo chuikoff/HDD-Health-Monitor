@@ -87,4 +87,14 @@ static inline HWND CreateWindowExU8(
                            hWndParent, hMenu, hInstance, lpParam);
 }
 
+static inline int MessageBoxU8(HWND hwnd, const char* text, const char* caption, UINT type)
+{
+    WCHAR wt[2048], wc[256];
+    U8ToW(text ? text : "", wt, 2048);
+    if (!caption)
+        return MessageBoxW(hwnd, wt, NULL, type);
+    U8ToW(caption, wc, 256);
+    return MessageBoxW(hwnd, wt, wc, type);
+}
+
 #endif /* UTF8UI_H */

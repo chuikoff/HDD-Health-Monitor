@@ -185,7 +185,7 @@ typedef enum _SMART_ACCESS_METHOD {
     SMART_ACCESS_SAT16             = 4,  /* SCSI 85h */
     SMART_ACCESS_STORAGE_QUERY     = 5,  /* IOCTL_STORAGE_QUERY_PROPERTY */
     SMART_ACCESS_NVME_PROTOCOL     = 6,  /* StorageDeviceProtocolSpecificProperty */
-    SMART_ACCESS_NVME_PASSTHROUGH  = 7   /* IOCTL_STORAGE_PROTOCOL_COMMAND */
+    SMART_ACCESS_NVME_PASSTHROUGH  = 7   /* USB NVMe vendor SCSI (not PROTOCOL_COMMAND) */
 } SMART_ACCESS_METHOD;
 
 #pragma pack(push, 1)
@@ -273,8 +273,9 @@ static_assert(sizeof(NVME_IDENTIFY_CONTROLLER) <= 4096,
 #endif
 
 /* ============================================================
- * Legacy ATA SMART structures
+ * Legacy ATA SMART structures (packed: 12 bytes per attr, ATA spec)
  * ============================================================ */
+#pragma pack(push, 1)
 typedef struct _SMART_ATTRIBUTE {
     BYTE  bAttrID;
     WORD  wStatusFlags;
@@ -299,8 +300,15 @@ typedef struct _SMART_ATTRIBUTE_DATA {
 typedef struct _SMART_THRESHOLD_DATA {
     WORD            wRevisionNumber;
     SMART_THRESHOLD stThresholds[30];
-    BYTE            bReserved[149];
+    BYTE            bReserved[150];
 } SMART_THRESHOLD_DATA;
+#pragma pack(pop)
+#ifdef __cplusplus
+static_assert(sizeof(SMART_ATTRIBUTE) == 12, "SMART_ATTRIBUTE must be 12 bytes");
+static_assert(sizeof(SMART_THRESHOLD) == 12, "SMART_THRESHOLD must be 12 bytes");
+static_assert(sizeof(SMART_ATTRIBUTE_DATA) == 512, "SMART_ATTRIBUTE_DATA must be 512 bytes");
+static_assert(sizeof(SMART_THRESHOLD_DATA) == 512, "SMART_THRESHOLD_DATA must be 512 bytes");
+#endif
 
 /* ============================================================
  * SMART Error Log structures (ATA8-ACS)
@@ -388,7 +396,6 @@ typedef struct _DRIVE_INFO {
 
     /* Diagnostics: last GetLastError() per probe path */
     DWORD       dwErrNvmeProtocol;
-    DWORD       dwErrNvmePassthrough;
     DWORD       dwErrSat16;
     DWORD       dwErrSat12;
     DWORD       dwErrStorageProtocol;
@@ -475,6 +482,7 @@ extern const ATTR_NAME g_AttrNames[];
  * Public API
  * ============================================================ */
 const char* GetAttrName(BYTE bID);
+const char* GetAttrNameEx(BYTE bID, DRIVE_VENDOR v, DRIVE_TYPE t);
 ATTR_CRITICALITY GetAttrCriticality(BYTE bID);
 ATTR_INTERP GetAttrInterpretation(BYTE bID);
 BOOL        IsAttrCritical(BYTE bID);
@@ -530,7 +538,6 @@ BOOL  GetSMARTSelfTestLogSAT(HANDLE hDrive, DRIVE_INFO* pInfo);
 BOOL  GetNVMeIdentifyController(HANDLE hDrive, DRIVE_INFO* pInfo);
 BOOL  GetNVMeHealthLog(HANDLE hDrive, DRIVE_INFO* pInfo);
 BOOL  GetNVMeHealthLogFallback(HANDLE hDrive, DRIVE_INFO* pInfo);
-BOOL  GetNVMeHealthLogPassthrough(HANDLE hDrive, DRIVE_INFO* pInfo);
 BOOL  GetNVMeHealthLogEx(HANDLE hDrive, DRIVE_INFO* pInfo);
 
 /* Detection & calculation */
@@ -545,8 +552,7 @@ void  ExtractSSDIndicators(DRIVE_INFO* pInfo);
 
 /* Aggregate scan.
  * ScanDrivesEx: bMeasureSpeed is ignored (always treated as FALSE).
- * MeasureReadSpeed/MeasureWriteSpeed are stubs that return -1 — 4MB
- * PhysicalDrive probes crashed USB flash on refresh.
+ * Speed probes were removed — 4MB PhysicalDrive I/O crashed USB flash.
  * ScanDrives() never measures speed. */
 int   ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives);
 int   ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed);
@@ -556,14 +562,13 @@ BOOL  RefreshDriveSmart(int nDriveIndex, DRIVE_INFO* pInfo);
 
 /* USB flash (UFD) heuristic: USB bus + flash-like product name, and not a
  * known NVMe/SATA enclosure bridge. Used to skip SAT/vendor SMART retries. */
+BOOL  UsbBridgeLooksLikeEnclosure(const DRIVE_INFO* p);
 BOOL  IsLikelyUsbFlashDrive(const DRIVE_INFO* pInfo);
 
 /* Utilities */
 void  FormatSize(DWORD dwMB, char* szBuf, int nBufLen);
 DWORD GetRawValue(BYTE* pRaw);
 unsigned __int64 GetRawValue48(BYTE* pRaw);
-int   MeasureReadSpeed(int nDriveIndex);
-int   MeasureWriteSpeed(int nDriveIndex);
 
 #ifdef __cplusplus
 }

@@ -39,6 +39,7 @@
 #include <regstr.h>
 #include <cfgmgr32.h>
 #include "smart.h"
+#include "safestr.h"
 
 /* #pragma comment(lib, "setupapi.lib") -- not supported by MinGW; linked via Makefile (-lsetupapi) */
 
@@ -51,6 +52,8 @@
  * which call ParseVidPidFromHardwareId. */
 static BOOL ParseVidPidFromHardwareId(const char* szHwId, WORD* pwVid, WORD* pwPid);
 static BOOL GetDevicePathFromHandle(HANDLE hDrive, WORD* pwVid, WORD* pwPid);
+static int FillSmartData(DRIVE_INFO* pInfo, const BYTE* pRawBuf);
+static int FillSmartThreshold(DRIVE_INFO* pInfo, const BYTE* pRawBuf);
 
 /* ============================================================
  * Internal definitions (compatibility shims)
@@ -196,13 +199,13 @@ static void FillNvmeProtocolFromIdent(DRIVE_INFO* pInfo)
     ver = (DWORD)id[80] | ((DWORD)id[81] << 8) |
           ((DWORD)id[82] << 16) | ((DWORD)id[83] << 24);
     if (ver == 0) {
-        _snprintf(pInfo->szProtocol, 32, "NVMe");
+        safe_snprintf(pInfo->szProtocol, "NVMe");
         return;
     }
     maj  = (ver >> 16) & 0xFFFF;
     minr = (ver >> 8) & 0xFF;
     ter  = ver & 0xFF;
-    _snprintf(pInfo->szProtocol, 32, "NVMe %u.%u.%u", maj, minr, ter);
+    safe_snprintf(pInfo->szProtocol, "NVMe %u.%u.%u", maj, minr, ter);
 }
 
 static void FillAtaProtocolFromIdent(DRIVE_INFO* pInfo, const WORD* pIdent)
@@ -215,23 +218,23 @@ static void FillAtaProtocolFromIdent(DRIVE_INFO* pInfo, const WORD* pIdent)
     /* Word 77 bits 3:1 = negotiated SATA speed (1=Gen1, 2=Gen2, 3=Gen3). */
     neg = (unsigned)((w77 >> 1) & 0x7);
     if (neg == 3)
-        _snprintf(pInfo->szProtocol, 32, "SATA 6 Гбит/с");
+        safe_snprintf(pInfo->szProtocol, "SATA 6 Гбит/с");
     else if (neg == 2)
-        _snprintf(pInfo->szProtocol, 32, "SATA 3 Гбит/с");
+        safe_snprintf(pInfo->szProtocol, "SATA 3 Гбит/с");
     else if (neg == 1)
-        _snprintf(pInfo->szProtocol, 32, "SATA 1.5 Гбит/с");
+        safe_snprintf(pInfo->szProtocol, "SATA 1.5 Гбит/с");
     else if (w76 != 0 && w76 != 0xFFFF) {
         /* Word 76: bit1=1.5, bit2=3.0, bit3=6.0 Gb/s supported. */
         if (w76 & 0x0008)
-            _snprintf(pInfo->szProtocol, 32, "SATA 6 Гбит/с");
+            safe_snprintf(pInfo->szProtocol, "SATA 6 Гбит/с");
         else if (w76 & 0x0004)
-            _snprintf(pInfo->szProtocol, 32, "SATA 3 Гбит/с");
+            safe_snprintf(pInfo->szProtocol, "SATA 3 Гбит/с");
         else if (w76 & 0x0002)
-            _snprintf(pInfo->szProtocol, 32, "SATA 1.5 Гбит/с");
+            safe_snprintf(pInfo->szProtocol, "SATA 1.5 Гбит/с");
         else
-            _snprintf(pInfo->szProtocol, 32, "SATA");
+            safe_snprintf(pInfo->szProtocol, "SATA");
     } else {
-        _snprintf(pInfo->szProtocol, 32, "ATA");
+        safe_snprintf(pInfo->szProtocol, "ATA");
     }
 }
 
@@ -245,20 +248,20 @@ static void FillDriveProtocol(DRIVE_INFO* pInfo)
         if (pInfo->bGotNVMeIdent) {
             FillNvmeProtocolFromIdent(pInfo);
         } else if (pInfo->szProtocol[0] == '\0') {
-            _snprintf(pInfo->szProtocol, 32, "NVMe");
+            safe_snprintf(pInfo->szProtocol, "NVMe");
         }
         return;
     }
 
     if (pInfo->bIsUSB && !pInfo->bSMART_Supported) {
-        _snprintf(hay, sizeof(hay), "%s %s %s",
+        safe_snprintf(hay, "%s %s %s",
                   pInfo->szModel, pInfo->szBridgeVendor, pInfo->szBridgeProduct);
         if (IsRealtekNvmeUsbBridge(pInfo) ||
             pInfo->eUsbBridgeType == USB_BRIDGE_NVME_REALTEK ||
             strstr(hay, "RTL9210") || strstr(hay, "RTL921"))
-            _snprintf(pInfo->szProtocol, 32, "USB (RTL9210)");
+            safe_snprintf(pInfo->szProtocol, "USB (RTL9210)");
         else
-            _snprintf(pInfo->szProtocol, 32, "USB");
+            safe_snprintf(pInfo->szProtocol, "USB");
         return;
     }
 
@@ -270,17 +273,17 @@ static void FillDriveProtocol(DRIVE_INFO* pInfo)
     if (pInfo->eType == DRIVE_TYPE_HDD ||
         pInfo->eType == DRIVE_TYPE_SSD_SATA ||
         pInfo->eType == DRIVE_TYPE_M2_SATA)
-        _snprintf(pInfo->szProtocol, 32, "SATA");
+        safe_snprintf(pInfo->szProtocol, "SATA");
     else if (pInfo->eType == DRIVE_TYPE_EMMC)
-        _snprintf(pInfo->szProtocol, 32, "eMMC");
+        safe_snprintf(pInfo->szProtocol, "eMMC");
     else if (pInfo->eType == DRIVE_TYPE_SD)
-        _snprintf(pInfo->szProtocol, 32, "SD");
+        safe_snprintf(pInfo->szProtocol, "SD");
     else if (pInfo->eType == DRIVE_TYPE_SCSI)
-        _snprintf(pInfo->szProtocol, 32, "SCSI");
+        safe_snprintf(pInfo->szProtocol, "SCSI");
     else if (pInfo->bIsUSB)
-        _snprintf(pInfo->szProtocol, 32, "USB");
+        safe_snprintf(pInfo->szProtocol, "USB");
     else if (pInfo->szProtocol[0] == '\0')
-        _snprintf(pInfo->szProtocol, 32, "ATA");
+        safe_snprintf(pInfo->szProtocol, "ATA");
 }
 
 /* memcpy Identify Controller without overreading a 4096-byte page. */
@@ -295,7 +298,7 @@ static void CopyNvmeIdentBuf(DRIVE_INFO* pInfo, const BYTE* pBuf, DWORD nAvail)
     if (n >= 84)
         FillNvmeProtocolFromIdent(pInfo);
     else
-        _snprintf(pInfo->szProtocol, 32, "NVMe");
+        safe_snprintf(pInfo->szProtocol, "NVMe");
 }
 
 /* Realtek RTL9210 USB dual-mode enclosure (NVMe via 0xE4, SATA via SAT).
@@ -312,7 +315,7 @@ static BOOL IsRealtekNvmeUsbBridge(const DRIVE_INFO* p)
     /* Any Realtek USB storage VID — SAT first, then 0xE4. */
     if (p->wUsbVid == 0x0BDA)
         return TRUE;
-    _snprintf(hay, sizeof(hay), "%s %s %s",
+    safe_snprintf(hay, "%s %s %s",
               p->szModel, p->szBridgeVendor, p->szBridgeProduct);
     for (i = 0; hay[i]; i++)
         hay[i] = (char)toupper((unsigned char)hay[i]);
@@ -423,7 +426,7 @@ static BOOL QueryNVMeProtocol(HANDLE hDrive, ULONG dataType, ULONG requestValue,
     addr.Length = sizeof(addr);
     if (DeviceIoControl(hDrive, IOCTL_SCSI_GET_ADDRESS,
             NULL, 0, &addr, sizeof(addr), &dwBytes, NULL)) {
-        _snprintf(szScsi, sizeof(szScsi), "\\\\.\\Scsi%d:", (int)addr.PortNumber);
+        safe_snprintf(szScsi, "\\\\.\\Scsi%d:", (int)addr.PortNumber);
         hScsi = CreateFileA(szScsi, GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL, NULL);
@@ -457,6 +460,31 @@ static void TrimStr(char* sz)
             sz[j] = sz[start + j];
         sz[j] = '\0';
     }
+}
+
+/* Bounded copy of a STORAGE_DEVICE_DESCRIPTOR string.
+ * Never reads past dwBytes; always NUL-terminates dst. */
+static void CopyDescStr(char* dst, size_t dstSize,
+                        const BYTE* buf, DWORD dwBytes, DWORD offset)
+{
+    size_t nMax, i;
+    const char* src;
+
+    if (!dst || dstSize == 0)
+        return;
+    dst[0] = '\0';
+    if (!buf || !offset || offset >= dwBytes)
+        return;
+
+    nMax = (size_t)(dwBytes - offset);
+    if (nMax > dstSize - 1)
+        nMax = dstSize - 1;
+
+    src = (const char*)(buf + offset);
+    for (i = 0; i < nMax && src[i] != '\0'; i++)
+        dst[i] = src[i];
+    dst[i] = '\0';
+    TrimStr(dst);
 }
 
 static void SwapATAString(char* szDst, const WORD* pSrc, int nWords)
@@ -701,6 +729,106 @@ const char* GetAttrName(BYTE bID)
     return "Неизвестный атрибут";
 }
 
+/* Vendor overlay: only IDs whose name differs from generic g_AttrNames.
+ * Terminated by id 0. HGST/Hitachi share WD names (generic already matches).
+ * Kioxia uses the Toshiba/Phison SATA-SSD overlay. Solidigm is VENDOR_INTEL. */
+typedef struct _ATTR_OVERLAY {
+    BYTE        id;
+    const char* name;
+} ATTR_OVERLAY;
+
+static const ATTR_OVERLAY g_OvSeagateHdd[] = {
+    { 0x01, "Частота ошибок чтения (RAW вендора)" },
+    { 0xBB, "Неисправимые ошибки" },
+    { 0xF0, "Часы полёта головок" },
+    { 0x00, NULL }
+};
+
+static const ATTR_OVERLAY g_OvSamsungSsd[] = {
+    { 0xB1, "Выравнивание износа" },
+    { 0xB3, "Использовано резервных блоков" },
+    { 0xB5, "Ошибки программирования" },
+    { 0xB6, "Ошибки стирания" },
+    { 0xB7, "Плохие блоки (runtime)" },
+    { 0xBB, "Неисправимые ошибки" },
+    { 0xEB, "Защита от потери питания" },
+    { 0x00, NULL }
+};
+
+/* Kingston/Phison, ADATA (SMI/Phison), SK Hynix SATA, Toshiba/Kioxia SSD */
+static const ATTR_OVERLAY g_OvPhisonSsd[] = {
+    { 0xE7, "Остаток ресурса SSD" },
+    { 0xE9, "Записи NAND (ГиБ)" },
+    { 0x00, NULL }
+};
+
+static const ATTR_OVERLAY g_OvToshibaHdd[] = {
+    { 0xC7, "Ошибки CRC" },
+    { 0x00, NULL }
+};
+
+static const ATTR_OVERLAY g_OvMicronSsd[] = {
+    { 0xCA, "Остаток ресурса %" },
+    { 0xF6, "Записано секторов хоста" },
+    { 0xAD, "Среднее стираний" },
+    { 0x00, NULL }
+};
+
+static const ATTR_OVERLAY g_OvIntelSsd[] = {
+    { 0xAA, "Доступное резервное пространство" },
+    { 0xE1, "Записи хоста" },
+    { 0xE2, "Таймер нагрузки" },
+    { 0xE8, "Доступное резервное пространство" },
+    { 0xE9, "Индикатор износа" },
+    { 0x00, NULL }
+};
+
+static const char* LookupOverlay(const ATTR_OVERLAY* tab, BYTE bID)
+{
+    int i;
+    if (!tab) return NULL;
+    for (i = 0; tab[i].id != 0; i++) {
+        if (tab[i].id == bID) return tab[i].name;
+    }
+    return NULL;
+}
+
+static const ATTR_OVERLAY* OverlayFor(DRIVE_VENDOR v, DRIVE_TYPE t)
+{
+    BOOL ssd = (t == DRIVE_TYPE_SSD_SATA || t == DRIVE_TYPE_M2_SATA);
+    BOOL hdd = (t == DRIVE_TYPE_HDD);
+    if (t == DRIVE_TYPE_NVME)
+        return NULL;
+
+    switch (v) {
+    case VENDOR_SEAGATE:
+        return ssd ? NULL : g_OvSeagateHdd;
+    case VENDOR_SAMSUNG:
+        return hdd ? NULL : g_OvSamsungSsd;
+    case VENDOR_KINGSTON:
+    case VENDOR_ADATA:
+    case VENDOR_SKHYNIX:
+    case VENDOR_KIOXIA:
+        return g_OvPhisonSsd;
+    case VENDOR_TOSHIBA:
+        return ssd ? g_OvPhisonSsd : g_OvToshibaHdd;
+    case VENDOR_MICRON:
+        return g_OvMicronSsd;
+    case VENDOR_INTEL:
+        return g_OvIntelSsd;
+    /* VENDOR_WDC / VENDOR_HITACHI: generic names already match WD/HGST HDD */
+    default:
+        return NULL;
+    }
+}
+
+const char* GetAttrNameEx(BYTE bID, DRIVE_VENDOR v, DRIVE_TYPE t)
+{
+    const char* s = LookupOverlay(OverlayFor(v, t), bID);
+    if (s) return s;
+    return GetAttrName(bID);
+}
+
 ATTR_CRITICALITY GetAttrCriticality(BYTE bID)
 {
     int i = 0;
@@ -847,7 +975,8 @@ DRIVE_VENDOR DetectDriveVendor(const char* szModel)
         return VENDOR_HITACHI;
 
     if (strstr(szUpper, "INTEL") || strstr(szUpper, "SSDSC") ||
-        strstr(szUpper, "SSDPED") || strstr(szUpper, "SSDPE"))
+        strstr(szUpper, "SSDPED") || strstr(szUpper, "SSDPE") ||
+        strstr(szUpper, "SOLIDIGM"))
         return VENDOR_INTEL;
 
     if (strstr(szUpper, "MICRON") || strstr(szUpper, "CRUCIAL") ||
@@ -921,7 +1050,7 @@ DRIVE_VENDOR DetectDriveVendor(const char* szModel)
 BOOL OpenDrive(int nDrive, HANDLE* phDrive)
 {
     char szPath[32];
-    _snprintf(szPath, sizeof(szPath), "\\\\.\\PhysicalDrive%d", nDrive);
+    safe_snprintf(szPath, "\\\\.\\PhysicalDrive%d", nDrive);
 
     *phDrive = CreateFileA(szPath,
         GENERIC_READ | GENERIC_WRITE,
@@ -944,7 +1073,7 @@ BOOL OpenDrive(int nDrive, HANDLE* phDrive)
 BOOL OpenDriveReadOnly(int nDrive, HANDLE* phDrive)
 {
     char szPath[32];
-    _snprintf(szPath, sizeof(szPath), "\\\\.\\PhysicalDrive%d", nDrive);
+    safe_snprintf(szPath, "\\\\.\\PhysicalDrive%d", nDrive);
     *phDrive = CreateFileA(szPath, GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL, OPEN_EXISTING, 0, NULL);
@@ -1107,18 +1236,9 @@ BOOL IsNVMeDrive(HANDLE hDrive)
                     return TRUE;
             }
 
-            /* Check vendor name for known NVMe bridge makers */
-            if (pDesc->VendorIdOffset && pDesc->VendorIdOffset < dwDevBytes) {
-                const char* pVen = (const char*)devBuf + pDesc->VendorIdOffset;
-                char szUpperV[33];
-                int k;
-                for (k = 0; k < 32 && pVen[k]; k++)
-                    szUpperV[k] = (char)toupper((unsigned char)pVen[k]);
-                szUpperV[k] = '\0';
-
-                /* Don't return TRUE for just "JMicron" etc. since they also make
-                 * SATA bridges. Only return if combined with other indicators. */
-            }
+            /* Vendor names like "JMicron" also appear on SATA bridges, so a
+             * vendor-only match is not enough to claim NVMe. Product-id
+             * checks above already cover the known NVMe bridge chips. */
         }
     }
     return FALSE;
@@ -1143,26 +1263,20 @@ BOOL GetDeviceDescriptor(HANDLE hDrive, DRIVE_INFO* pInfo)
                          &dwBytes, NULL))
         return FALSE;
 
+    if (dwBytes < sizeof(STORAGE_DEVICE_DESCRIPTOR))
+        return FALSE;
+
     STORAGE_DEVICE_DESCRIPTOR* pDesc = (STORAGE_DEVICE_DESCRIPTOR*)outBuf;
 
-    if (pDesc->ProductIdOffset && pDesc->ProductIdOffset < dwBytes &&
-        pInfo->szModel[0] == '\0') {
-        strncpy(pInfo->szModel, (const char*)outBuf + pDesc->ProductIdOffset, 40);
-        pInfo->szModel[40] = '\0';
-        TrimStr(pInfo->szModel);
-    }
-    if (pDesc->SerialNumberOffset && pDesc->SerialNumberOffset < dwBytes &&
-        pInfo->szSerial[0] == '\0') {
-        strncpy(pInfo->szSerial, (const char*)outBuf + pDesc->SerialNumberOffset, 20);
-        pInfo->szSerial[20] = '\0';
-        TrimStr(pInfo->szSerial);
-    }
-    if (pDesc->ProductRevisionOffset && pDesc->ProductRevisionOffset < dwBytes &&
-        pInfo->szFirmware[0] == '\0') {
-        strncpy(pInfo->szFirmware, (const char*)outBuf + pDesc->ProductRevisionOffset, 8);
-        pInfo->szFirmware[8] = '\0';
-        TrimStr(pInfo->szFirmware);
-    }
+    if (pInfo->szModel[0] == '\0')
+        CopyDescStr(pInfo->szModel, sizeof(pInfo->szModel),
+                    outBuf, dwBytes, pDesc->ProductIdOffset);
+    if (pInfo->szSerial[0] == '\0')
+        CopyDescStr(pInfo->szSerial, sizeof(pInfo->szSerial),
+                    outBuf, dwBytes, pDesc->SerialNumberOffset);
+    if (pInfo->szFirmware[0] == '\0')
+        CopyDescStr(pInfo->szFirmware, sizeof(pInfo->szFirmware),
+                    outBuf, dwBytes, pDesc->ProductRevisionOffset);
     return TRUE;
 }
 
@@ -1190,30 +1304,22 @@ BOOL GetBridgeIdentity(HANDLE hDrive, DRIVE_INFO* pInfo)
                          &dwBytes, NULL))
         return FALSE;
 
+    if (dwBytes < sizeof(STORAGE_DEVICE_DESCRIPTOR))
+        return FALSE;
+
     STORAGE_DEVICE_DESCRIPTOR* pDesc = (STORAGE_DEVICE_DESCRIPTOR*)outBuf;
 
-    if (pDesc->VendorIdOffset && pDesc->VendorIdOffset < dwBytes) {
-        strncpy(pInfo->szBridgeVendor, (const char*)outBuf + pDesc->VendorIdOffset, 8);
-        pInfo->szBridgeVendor[8] = '\0';
-        TrimStr(pInfo->szBridgeVendor);
-    }
-    if (pDesc->ProductIdOffset && pDesc->ProductIdOffset < dwBytes) {
-        strncpy(pInfo->szBridgeProduct, (const char*)outBuf + pDesc->ProductIdOffset, 16);
-        pInfo->szBridgeProduct[16] = '\0';
-        TrimStr(pInfo->szBridgeProduct);
-    }
+    CopyDescStr(pInfo->szBridgeVendor, sizeof(pInfo->szBridgeVendor),
+                outBuf, dwBytes, pDesc->VendorIdOffset);
+    CopyDescStr(pInfo->szBridgeProduct, sizeof(pInfo->szBridgeProduct),
+                outBuf, dwBytes, pDesc->ProductIdOffset);
 
-    /* Try to extract VID/PID from the STORAGE_DEVICE_DESCRIPTOR strings.
+    /* Try to extract VID/PID from the (already bounded) descriptor strings.
      * Some USB bridges include VID/PID in the vendor or product strings. */
-    if (pDesc->VendorIdOffset && pDesc->VendorIdOffset < dwBytes) {
-        const char* pStr = (const char*)outBuf + pDesc->VendorIdOffset;
-        ParseVidPidFromHardwareId(pStr, &pInfo->wUsbVid, &pInfo->wUsbPid);
-    }
-    if (pInfo->wUsbVid == 0 && pInfo->wUsbPid == 0 &&
-        pDesc->ProductIdOffset && pDesc->ProductIdOffset < dwBytes) {
-        const char* pStr = (const char*)outBuf + pDesc->ProductIdOffset;
-        ParseVidPidFromHardwareId(pStr, &pInfo->wUsbVid, &pInfo->wUsbPid);
-    }
+    if (pInfo->szBridgeVendor[0])
+        ParseVidPidFromHardwareId(pInfo->szBridgeVendor, &pInfo->wUsbVid, &pInfo->wUsbPid);
+    if (pInfo->wUsbVid == 0 && pInfo->wUsbPid == 0 && pInfo->szBridgeProduct[0])
+        ParseVidPidFromHardwareId(pInfo->szBridgeProduct, &pInfo->wUsbVid, &pInfo->wUsbPid);
 
     /* Also try SCSI INQUIRY to get bridge vendor/product for more accurate detection.
      * SCSI INQUIRY for USB bridge identification. */
@@ -1500,6 +1606,10 @@ static BOOL GetCapacityFromGeometry(HANDLE hDrive, DRIVE_INFO* pInfo)
 
 /* ============================================================
  * Legacy SMART IOCTL path
+ *
+ * SMART_SEND_DRIVE_COMMAND / SMART_RCV_DRIVE_DATA: bDriveNumber is the
+ * IDE target on that controller (0..3), not PhysicalDriveN. The handle
+ * is already \\.\PhysicalDriveN, so bDriveNumber must be 0.
  * ============================================================ */
 BOOL EnableSMART(HANDLE hDrive, int nDrive)
 {
@@ -1517,7 +1627,7 @@ BOOL EnableSMART(HANDLE hDrive, int nDrive)
     cip.irDriveRegs.bCylHighReg     = SMART_CYL_HI;
     cip.irDriveRegs.bDriveHeadReg   = 0xA0;
     cip.irDriveRegs.bCommandReg     = SMART_CMD;
-    cip.bDriveNumber                = (BYTE)nDrive;
+    cip.bDriveNumber                = 0;  /* handle is already the drive */
 
     return DeviceIoControl(hDrive, SMART_SEND_DRIVE_COMMAND,
         &cip, sizeof(SENDCMDINPARAMS) - 1,
@@ -1539,7 +1649,7 @@ BOOL GetIdentifyData(HANDLE hDrive, int nDrive, DRIVE_INFO* pInfo)
     pCip->irDriveRegs.bSectorNumberReg= 1;
     pCip->irDriveRegs.bDriveHeadReg   = 0xA0;
     pCip->irDriveRegs.bCommandReg     = ID_CMD;
-    pCip->bDriveNumber                = (BYTE)nDrive;
+    pCip->bDriveNumber                = 0;  /* handle is already the drive */
 
     if (!DeviceIoControl(hDrive, SMART_RCV_DRIVE_DATA,
             pCip, sizeof(SENDCMDINPARAMS) - 1,
@@ -1602,7 +1712,7 @@ BOOL GetSMARTAttributes(HANDLE hDrive, int nDrive, DRIVE_INFO* pInfo)
     pCip->irDriveRegs.bCylHighReg     = SMART_CYL_HI;
     pCip->irDriveRegs.bDriveHeadReg   = 0xA0;
     pCip->irDriveRegs.bCommandReg     = SMART_CMD;
-    pCip->bDriveNumber                = (BYTE)nDrive;
+    pCip->bDriveNumber                = 0;  /* handle is already the drive */
 
     if (!DeviceIoControl(hDrive, SMART_RCV_DRIVE_DATA,
             pCip, sizeof(SENDCMDINPARAMS) - 1,
@@ -1612,8 +1722,7 @@ BOOL GetSMARTAttributes(HANDLE hDrive, int nDrive, DRIVE_INFO* pInfo)
     SENDCMDOUTPARAMS* pCop = (SENDCMDOUTPARAMS*)outBuf;
     if (IsBufferAllZero(pCop->bBuffer + 2, 30)) return FALSE;
 
-    memcpy(&pInfo->attrData, pCop->bBuffer, sizeof(SMART_ATTRIBUTE_DATA));
-    return TRUE;
+    return FillSmartData(pInfo, pCop->bBuffer) > 0;
 }
 
 BOOL GetSMARTThresholds(HANDLE hDrive, int nDrive, DRIVE_INFO* pInfo)
@@ -1633,7 +1742,7 @@ BOOL GetSMARTThresholds(HANDLE hDrive, int nDrive, DRIVE_INFO* pInfo)
     pCip->irDriveRegs.bCylHighReg     = SMART_CYL_HI;
     pCip->irDriveRegs.bDriveHeadReg   = 0xA0;
     pCip->irDriveRegs.bCommandReg     = SMART_CMD;
-    pCip->bDriveNumber                = (BYTE)nDrive;
+    pCip->bDriveNumber                = 0;  /* handle is already the drive */
 
     if (!DeviceIoControl(hDrive, SMART_RCV_DRIVE_DATA,
             pCip, sizeof(SENDCMDINPARAMS) - 1,
@@ -1641,7 +1750,7 @@ BOOL GetSMARTThresholds(HANDLE hDrive, int nDrive, DRIVE_INFO* pInfo)
         return FALSE;
 
     SENDCMDOUTPARAMS* pCop = (SENDCMDOUTPARAMS*)outBuf;
-    memcpy(&pInfo->threshData, pCop->bBuffer, sizeof(SMART_THRESHOLD_DATA));
+    FillSmartThreshold(pInfo, pCop->bBuffer);
     return TRUE;
 }
 
@@ -1670,7 +1779,7 @@ BOOL GetSMARTPredictFailure(HANDLE hDrive, int nDrive, BOOL* pbFail)
     cip.irDriveRegs.bCylHighReg     = SMART_CYL_HI;
     cip.irDriveRegs.bDriveHeadReg   = 0xA0;
     cip.irDriveRegs.bCommandReg     = SMART_CMD;
-    cip.bDriveNumber                = (BYTE)nDrive;
+    cip.bDriveNumber                = 0;  /* handle is already the drive */
 
     BOOL bOK = DeviceIoControl(hDrive, SMART_SEND_DRIVE_COMMAND,
         &cip, sizeof(SENDCMDINPARAMS) - 1,
@@ -1705,7 +1814,7 @@ static BOOL ReadSMARTLog(HANDLE hDrive, int nDrive, BYTE bLogAddr,
     pCip->irDriveRegs.bCylHighReg     = SMART_CYL_HI;
     pCip->irDriveRegs.bDriveHeadReg   = 0xA0;
     pCip->irDriveRegs.bCommandReg     = SMART_CMD;
-    pCip->bDriveNumber                = (BYTE)nDrive;
+    pCip->bDriveNumber                = 0;  /* handle is already the drive */
 
     if (!DeviceIoControl(hDrive, SMART_RCV_DRIVE_DATA,
             pCip, sizeof(SENDCMDINPARAMS) - 1,
@@ -1936,8 +2045,7 @@ BOOL GetSMARTAttributesATAPassthrough(HANDLE hDrive, DRIVE_INFO* pInfo)
     if (IsBufferAllZero(data + 2, 30) || IsBufferAllFF(data + 2, 30))
         return FALSE;
 
-    memcpy(&pInfo->attrData, data, sizeof(SMART_ATTRIBUTE_DATA));
-    return TRUE;
+    return FillSmartData(pInfo, data) > 0;
 }
 
 BOOL GetSMARTThresholdsATAPassthrough(HANDLE hDrive, DRIVE_INFO* pInfo)
@@ -1950,7 +2058,7 @@ BOOL GetSMARTThresholdsATAPassthrough(HANDLE hDrive, DRIVE_INFO* pInfo)
                         data, READ_THRESHOLD_BUFFER_SIZE, TRUE))
         return FALSE;
 
-    memcpy(&pInfo->threshData, data, sizeof(SMART_THRESHOLD_DATA));
+    FillSmartThreshold(pInfo, data);
     return TRUE;
 }
 
@@ -2177,7 +2285,8 @@ BOOL GetSMARTAttributesSAT(HANDLE hDrive, DRIVE_INFO* pInfo)
     if (IsBufferAllZero(data + 2, 30) || IsBufferAllFF(data + 2, 30))
         return FALSE;
 
-    memcpy(&pInfo->attrData, data, sizeof(SMART_ATTRIBUTE_DATA));
+    if (FillSmartData(pInfo, data) <= 0)
+        return FALSE;
     if (pInfo->eAccessMethod == SMART_ACCESS_NONE) pInfo->eAccessMethod = method;
     return TRUE;
 }
@@ -2193,7 +2302,7 @@ BOOL GetSMARTThresholdsSAT(HANDLE hDrive, DRIVE_INFO* pInfo)
             SAT_PROTO_PIO_IN, data, READ_THRESHOLD_BUFFER_SIZE, &method))
         return FALSE;
 
-    memcpy(&pInfo->threshData, data, sizeof(SMART_THRESHOLD_DATA));
+    FillSmartThreshold(pInfo, data);
     return TRUE;
 }
 
@@ -2338,7 +2447,10 @@ BOOL GetSMARTViaStorageProtocol(HANDLE hDrive, DRIVE_INFO* pInfo)
         pInfo->dwErrStorageProtocol = ERROR_INVALID_DATA;
         return FALSE;
     }
-    memcpy(&pInfo->attrData, pData, sizeof(SMART_ATTRIBUTE_DATA));
+    if (FillSmartData(pInfo, pData) <= 0) {
+        pInfo->dwErrStorageProtocol = ERROR_INVALID_DATA;
+        return FALSE;
+    }
 
     ZeroMemory(buf, sizeof(buf));
     pQ = (MY_STORAGE_PROTOCOL_QUERY*)buf;
@@ -2353,7 +2465,7 @@ BOOL GetSMARTViaStorageProtocol(HANDLE hDrive, DRIVE_INFO* pInfo)
             buf, sizeof(buf), buf, sizeof(buf), &dwBytes, NULL) &&
         dwBytes >= (ULONG)(sizeof(ULONG)*2 + sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA) + 16)) {
         pData = buf + sizeof(ULONG)*2 + sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA);
-        memcpy(&pInfo->threshData, pData, sizeof(SMART_THRESHOLD_DATA));
+        FillSmartThreshold(pInfo, pData);
     }
 
     pInfo->eAccessMethod = SMART_ACCESS_STORAGE_QUERY;
@@ -2433,87 +2545,6 @@ BOOL GetNVMeHealthLogFallback(HANDLE hDrive, DRIVE_INFO* pInfo)
     return GetNVMeHealthLog(hDrive, pInfo);
 }
 
-BOOL GetNVMeHealthLogPassthrough(HANDLE hDrive, DRIVE_INFO* pInfo)
-{
-#ifndef IOCTL_STORAGE_PROTOCOL_COMMAND
-    #define IOCTL_STORAGE_PROTOCOL_COMMAND \
-        CTL_CODE(IOCTL_STORAGE_BASE, 0x04F0, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
-#endif
-
-#pragma pack(push,1)
-    typedef struct {
-        ULONG Version;
-        ULONG Length;
-        ULONG ProtocolType;
-        ULONG Flags;
-        ULONG ReturnStatus;
-        ULONG ErrorCode;
-        ULONG CommandLength;
-        ULONG ErrorInfoLength;
-        ULONG DataToDeviceTransferLength;
-        ULONG DataFromDeviceTransferLength;
-        ULONG TimeOutValue;
-        ULONG ErrorInfoOffset;
-        ULONG DataToDeviceBufferOffset;
-        ULONG DataFromDeviceBufferOffset;
-        ULONG CommandSpecific;
-        ULONG Reserved0;
-        ULONG FixedProtocolReturnData;
-        ULONG Reserved1[3];
-        UCHAR Command[64];
-    } MY_STORAGE_PROTOCOL_COMMAND;
-#pragma pack(pop)
-
-    const DWORD bufSize = sizeof(MY_STORAGE_PROTOCOL_COMMAND) + sizeof(NVME_HEALTH_INFO_LOG) + 64;
-    BYTE* pBuf = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bufSize);
-    if (!pBuf) return FALSE;
-
-    MY_STORAGE_PROTOCOL_COMMAND* pCmd = (MY_STORAGE_PROTOCOL_COMMAND*)pBuf;
-    pCmd->Version       = 1;
-    pCmd->Length        = sizeof(MY_STORAGE_PROTOCOL_COMMAND);
-    pCmd->ProtocolType  = MY_ProtocolTypeNvme;
-    pCmd->Flags         = 0x80000000;
-    pCmd->CommandLength = 64;
-    pCmd->DataFromDeviceTransferLength = sizeof(NVME_HEALTH_INFO_LOG);
-    pCmd->TimeOutValue  = 10;
-    pCmd->DataFromDeviceBufferOffset = sizeof(MY_STORAGE_PROTOCOL_COMMAND);
-
-    pCmd->Command[0] = 0x02;
-    DWORD numDwords = (sizeof(NVME_HEALTH_INFO_LOG) / 4) - 1;
-    pCmd->Command[40] = NVME_LOG_PAGE_HEALTH_INFO;
-    pCmd->Command[42] = (BYTE)(numDwords & 0xFF);
-    pCmd->Command[43] = (BYTE)((numDwords >> 8) & 0xFF);
-    pCmd->Command[4] = 0xFF; pCmd->Command[5] = 0xFF;
-    pCmd->Command[6] = 0xFF; pCmd->Command[7] = 0xFF;
-
-    DWORD dwBytes = 0;
-    BOOL bOK = DeviceIoControl(hDrive, IOCTL_STORAGE_PROTOCOL_COMMAND,
-        pBuf, bufSize, pBuf, bufSize, &dwBytes, NULL);
-
-    if (!bOK || dwBytes < sizeof(MY_STORAGE_PROTOCOL_COMMAND) + 16) {
-        if (pInfo) pInfo->dwErrNvmePassthrough = bOK ? ERROR_INVALID_DATA : GetLastError();
-        HeapFree(GetProcessHeap(), 0, pBuf);
-        return FALSE;
-    }
-
-    BYTE* pData = pBuf + sizeof(MY_STORAGE_PROTOCOL_COMMAND);
-    if (IsBufferAllZero(pData, 16)) {
-        if (pInfo) pInfo->dwErrNvmePassthrough = ERROR_INVALID_DATA;
-        HeapFree(GetProcessHeap(), 0, pBuf);
-        return FALSE;
-    }
-
-    memcpy(&pInfo->nvmeHealth, pData, sizeof(NVME_HEALTH_INFO_LOG));
-    pInfo->bIsNVMe          = TRUE;
-    pInfo->bSMART_Supported = TRUE;
-    pInfo->bSMART_Enabled   = TRUE;
-    pInfo->eAccessMethod    = SMART_ACCESS_NVME_PASSTHROUGH;
-
-    HeapFree(GetProcessHeap(), 0, pBuf);
-    return TRUE;
-}
-
-
 #ifndef NVME_PASS_THROUGH_SRB_IO_CODE
 #define NVME_STORPORT_DRIVER 0xE000
 #define NVME_PASS_THROUGH_SRB_IO_CODE CTL_CODE(NVME_STORPORT_DRIVER, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -2573,7 +2604,7 @@ static HANDLE OpenScsiAdapterFromDrive(HANDLE hDrive, SCSI_ADDRESS* pAddr)
             NULL, 0, &addr, sizeof(addr), &dw, NULL))
         return INVALID_HANDLE_VALUE;
     if (pAddr) *pAddr = addr;
-    _snprintf(sz, sizeof(sz), "\\\\.\\Scsi%d:", (int)addr.PortNumber);
+    safe_snprintf(sz, "\\\\.\\Scsi%d:", (int)addr.PortNumber);
     hScsi = CreateFileA(sz, GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL, NULL);
@@ -2683,9 +2714,7 @@ BOOL GetNVMeHealthLogEx(HANDLE hDrive, DRIVE_INFO* pInfo)
      * meaningless on USB SAT). Never run this path on bus type 7. */
     if (GetStorageBusType(hDrive) == 7)
         return FALSE;
-    /* Do not call GetNVMeHealthLogPassthrough / IOCTL_STORAGE_PROTOCOL_COMMAND.
-     * That IOCTL bugchecked nvme.sys (issue #1). SCSI miniport is the
-     * CrystalDiskInfo path used when QUERY_PROPERTY returns ERROR_INVALID_FUNCTION. */
+    /* Do not call IOCTL_STORAGE_PROTOCOL_COMMAND — it bugchecked nvme.sys. */
     if (GetNVMeHealthLog(hDrive, pInfo)) return TRUE;
     if (GetNVMeHealthLogFallback(hDrive, pInfo)) return TRUE;
     ZeroMemory(health, sizeof(health));
@@ -3263,16 +3292,24 @@ void ExtractSSDIndicators(DRIVE_INFO* pInfo)
             if (pInfo->nSSDAvgEraseCount < 0)
                 pInfo->nSSDAvgEraseCount = (int)GetRawValue(pA->bRawValue);
             break;
-        case 0xAD:
-            /* 0xAD is used by different vendors for different purposes:
-             * - Some vendors report Average Erase Count (e.g. Intel)
-             * - Others report Wear Leveling Count (e.g. Samsung)
-             * Fill whichever field hasn't been set yet. */
-            if (pInfo->nSSDWearLevelingCount < 0)
-                pInfo->nSSDWearLevelingCount = (int)GetRawValue(pA->bRawValue);
-            if (pInfo->nSSDAvgEraseCount < 0)
-                pInfo->nSSDAvgEraseCount = (int)GetRawValue(pA->bRawValue);
+        case 0xAD: {
+            /* 0xAD: Samsung = wear leveling only; Intel = avg erase only.
+             * Other vendors may fill both when neither is set yet. */
+            int nAd = (int)GetRawValue(pA->bRawValue);
+            if (pInfo->eVendor == VENDOR_SAMSUNG) {
+                if (pInfo->nSSDWearLevelingCount < 0)
+                    pInfo->nSSDWearLevelingCount = nAd;
+            } else if (pInfo->eVendor == VENDOR_INTEL) {
+                if (pInfo->nSSDAvgEraseCount < 0)
+                    pInfo->nSSDAvgEraseCount = nAd;
+            } else {
+                if (pInfo->nSSDWearLevelingCount < 0)
+                    pInfo->nSSDWearLevelingCount = nAd;
+                if (pInfo->nSSDAvgEraseCount < 0)
+                    pInfo->nSSDAvgEraseCount = nAd;
+            }
             break;
+        }
         case 0xEA:
             if (pInfo->nSSDAvgEraseCount < 0)
                 pInfo->nSSDAvgEraseCount = (int)GetRawValue(pA->bRawValue);
@@ -3317,8 +3354,22 @@ static void ExtractTemperatureFromATA(DRIVE_INFO* pInfo)
             return;
         }
         if (pA->bAttrID == 0xE7 && pInfo->nTemperatureC < 0) {
-            int t = (int)GetRawValue16Lo(pA->bRawValue);
-            if (t > 0 && t <= 150) pInfo->nTemperatureC = t;
+            /* Kingston/Phison A400 and similar: 0xE7 is life remaining, not °C. */
+            DRIVE_VENDOR ev = pInfo->eVendor;
+            DRIVE_TYPE   et = pInfo->eType;
+            BOOL bLifeVendor = (ev == VENDOR_KINGSTON || ev == VENDOR_ADATA ||
+                                ev == VENDOR_SKHYNIX || ev == VENDOR_KIOXIA);
+            BOOL bUnknownSsd = ((ev == VENDOR_UNKNOWN || ev == VENDOR_OTHER) &&
+                                (et == DRIVE_TYPE_SSD_SATA || et == DRIVE_TYPE_M2_SATA));
+            if (bLifeVendor || bUnknownSsd)
+                continue;
+            if (ev == VENDOR_TOSHIBA &&
+                (et == DRIVE_TYPE_SSD_SATA || et == DRIVE_TYPE_M2_SATA))
+                continue;
+            {
+                int nT = (int)GetRawValue16Lo(pA->bRawValue);
+                if (nT > 0 && nT <= 150) pInfo->nTemperatureC = nT;
+            }
         }
     }
 }
@@ -3381,13 +3432,14 @@ static int FillSmartData(DRIVE_INFO* pInfo, const BYTE* pRawBuf)
         BYTE bID = pEntry[0];
         if (bID == 0) continue;
 
+        /* ATA 12-byte attr: ID, flags[1..2], value, worst, raw[5..10], reserved[11]. */
         SMART_ATTRIBUTE* pA = &pInfo->attrData.stAttributes[nCount];
-        pA->bAttrID     = bID;
-        pA->wStatusFlags = (WORD)pEntry[2] | ((WORD)pEntry[3] << 8);
-        pA->bAttrValue   = pEntry[4];
-        pA->bWorstValue  = pEntry[5];
-        memcpy(pA->bRawValue, &pEntry[6], 6);
-        pA->bReserved    = pEntry[12];
+        pA->bAttrID      = bID;
+        pA->wStatusFlags = (WORD)pEntry[1] | ((WORD)pEntry[2] << 8);
+        pA->bAttrValue   = pEntry[3];
+        pA->bWorstValue  = pEntry[4];
+        memcpy(pA->bRawValue, &pEntry[5], 6);
+        pA->bReserved    = pEntry[11];
         nCount++;
     }
     return nCount;
@@ -3404,6 +3456,8 @@ static int FillSmartThreshold(DRIVE_INFO* pInfo, const BYTE* pRawBuf)
 {
     int nCount = 0;
     int i, j;
+    ZeroMemory(&pInfo->threshData, sizeof(SMART_THRESHOLD_DATA));
+    pInfo->threshData.wRevisionNumber = (WORD)pRawBuf[0] | ((WORD)pRawBuf[1] << 8);
 
     for (i = 0; i < 30; i++) {
         const BYTE* pEntry = pRawBuf + 2 + i * 12;
@@ -4269,7 +4323,7 @@ BOOL RefreshDriveSmart(int nDriveIndex, DRIVE_INFO* pInfo)
 
 /* Heuristic: consumer USB flash almost never exposes SMART. Known HDD/SSD
  * enclosure bridges (RTL9210, JMicron, ASMedia, Realtek NVMe, …) are NOT flash. */
-static BOOL UsbBridgeLooksLikeEnclosure(const DRIVE_INFO* p)
+BOOL UsbBridgeLooksLikeEnclosure(const DRIVE_INFO* p)
 {
     char hay[384];
     if (!p) return FALSE;
@@ -4295,7 +4349,7 @@ static BOOL UsbBridgeLooksLikeEnclosure(const DRIVE_INFO* p)
     default:
         break;
     }
-    _snprintf(hay, sizeof(hay), "%s %s %s",
+    safe_snprintf(hay, "%s %s %s",
               p->szModel, p->szBridgeVendor, p->szBridgeProduct);
     if (strstr(hay, "RTL9210") || strstr(hay, "RTL921") ||
         strstr(hay, "Realtek") || strstr(hay, "REALTEK") ||
@@ -4313,7 +4367,7 @@ BOOL IsLikelyUsbFlashDrive(const DRIVE_INFO* p)
     if (!p || !p->bIsUSB || p->bIsNVMe) return FALSE;
     if (UsbBridgeLooksLikeEnclosure(p)) return FALSE;
 
-    _snprintf(hay, sizeof(hay), "%s %s %s",
+    safe_snprintf(hay, "%s %s %s",
               p->szModel, p->szBridgeVendor, p->szBridgeProduct);
 
     /* SATA/NVMe SSD in an enclosure (Kingston A400, etc.) is NOT a stick. */
@@ -4356,6 +4410,8 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
         pInfo->nDriveIndex    = nDrive;
         pInfo->nTemperatureC  = -1;
         pInfo->nHealthPercent = -1;
+        pInfo->nReadSpeedMBs  = -1;
+        pInfo->nWriteSpeedMBs = -1;
         pInfo->eType          = DRIVE_TYPE_UNKNOWN;
         pInfo->eAccessMethod  = SMART_ACCESS_NONE;
         pInfo->eHealthStatus  = HEALTH_STATUS_UNKNOWN;
@@ -4390,10 +4446,6 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
             FillDriveProtocol(pInfo);
 
             CloseHandle(hDrive);
-            if (bMeasureSpeed) {
-                pInfo->nReadSpeedMBs  = MeasureReadSpeed(nDrive);
-                pInfo->nWriteSpeedMBs = MeasureWriteSpeed(nDrive);
-            }
             nFound++;
             continue;
         }
@@ -4409,10 +4461,6 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
             pInfo->eVendor          = DetectDriveVendor(pInfo->szModel);
             FillDriveProtocol(pInfo);
             CloseHandle(hDrive);
-            if (bMeasureSpeed) {
-                pInfo->nReadSpeedMBs  = MeasureReadSpeed(nDrive);
-                pInfo->nWriteSpeedMBs = MeasureWriteSpeed(nDrive);
-            }
             nFound++;
             continue;
         }
@@ -4719,10 +4767,6 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
         FillDriveProtocol(pInfo);
 
         CloseHandle(hDrive);
-        if (bMeasureSpeed) {
-            pInfo->nReadSpeedMBs  = MeasureReadSpeed(nDrive);
-            pInfo->nWriteSpeedMBs = MeasureWriteSpeed(nDrive);
-        }
         nFound++;
     }
 
@@ -4730,26 +4774,15 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
 }
 
 /* ============================================================
- * Formatting / benchmarks
+ * Formatting
  * ============================================================ */
 void FormatSize(DWORD dwMB, char* szBuf, int nBufLen)
 {
     if (dwMB >= 1024 * 1024)
-        _snprintf(szBuf, nBufLen, "%.1f TB", (double)dwMB / (1024.0 * 1024.0));
+        safe_snprintf_n(szBuf, nBufLen, "%.1f TB", (double)dwMB / (1024.0 * 1024.0));
     else if (dwMB >= 1024)
-        _snprintf(szBuf, nBufLen, "%.1f GB", (double)dwMB / 1024.0);
+        safe_snprintf_n(szBuf, nBufLen, "%.1f GB", (double)dwMB / 1024.0);
     else
-        _snprintf(szBuf, nBufLen, "%u MB", (unsigned)dwMB);
+        safe_snprintf_n(szBuf, nBufLen, "%u MB", (unsigned)dwMB);
 }
 
-int MeasureReadSpeed(int nDriveIndex)
-{
-    (void)nDriveIndex;
-    return -1;
-}
-
-int MeasureWriteSpeed(int nDriveIndex)
-{
-    (void)nDriveIndex;
-    return -1;
-}

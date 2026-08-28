@@ -3,9 +3,6 @@
  *  ---------------------------------------------------------------------------
  *  This project is 100% Free and Open Source Software (FOSS).
  *
- *  Author  : Ari Sohandri Putra
- *  Company : ARImetic Inc.
- *  Sponsor : https://github.com/sponsors/arisohandriputra/
  *  License : MIT (see LICENSE file in the project root)
  * ============================================================================
  */
@@ -21,16 +18,15 @@
 /*  Public constants                                                  */
 /* ------------------------------------------------------------------ */
 
-/* GitHub Sponsors page for the author.
+/* Boosty page for chuikoff.
    Opening this URL is the only action the Donate UI performs. */
-#define DONATE_URL      "https://github.com/sponsors/arisohandriputra/"
+#define DONATE_URL      "https://boosty.to/chuikoff"
 
 /* Author / project attribution strings, kept in one place so that
-   every UI surface (About dialog, donate dialog, manifest, version
-   info) stays perfectly consistent. */
-#define DONATE_AUTHOR   "Ari Sohandri Putra"
-#define DONATE_COMPANY  "ARImetic Inc."
-#define DONATE_PRODUCT  "HDDHealth Monitor"
+   every UI surface (About dialog, donate dialog, version info)
+   stays perfectly consistent. */
+#define DONATE_AUTHOR   "chuikoff"
+#define DONATE_PRODUCT  "DriveMonitor"
 
 /* Dialog control identifiers - intentionally scoped to the donate
    dialog so they do not collide with the main window IDs. */
@@ -46,13 +42,13 @@
 extern "C" {
 #endif
 
-/* Open the GitHub Sponsors page in the user's default browser.
+/* Open the Boosty page in the user's default browser.
    Returns TRUE on success, FALSE if ShellExecute failed. */
 BOOL    Donate_OpenSponsorsPage(HWND hParent);
 
 /* Show the modal Donate dialog.  The dialog explains that the
-   program is free / open source and offers a single "Donate"
-   button that opens the GitHub Sponsors page. */
+   program is free / open source and offers a single support
+   button that opens the Boosty page. */
 void    Donate_ShowDialog(HWND hParent);
 
 /* Startup hook - kept for source-level compatibility with the
