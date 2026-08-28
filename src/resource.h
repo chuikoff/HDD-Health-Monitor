@@ -26,4 +26,8 @@
 
 #define IDR_VERSION     1
 
+/* Info-panel USB adapter row (CreateWindowExU8 / SetDlgItemTextU8) */
+#define IDC_ADAPTER_LABEL   1027
+#define IDC_ADAPTER_STATIC  1028
+
 #endif

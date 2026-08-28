@@ -61,6 +61,136 @@ static WORD ReadLE16(const BYTE* p)
     return (WORD)p[0] | ((WORD)p[1] << 8);
 }
 
+/* NVMe Health Log Data Units: 1 unit = 1000 * 512 = 512000 bytes (NVMe spec).
+ * CrystalDiskInfo TBW = units * 512000 / 1e12. */
+static void FormatNvmeHostBytes(unsigned __int64 units, char* szBuf, int nBufLen)
+{
+    double bytes = (double)units * 512000.0;
+    double tb = bytes / 1e12;
+    if (tb >= 1.0)
+        _snprintf(szBuf, nBufLen, "%.1f ТБ", tb);
+    else
+        _snprintf(szBuf, nBufLen, "%.1f ГБ", bytes / 1e9);
+}
+
+/* USB enclosure/chip name from SCSI INQUIRY; type name / VID:PID fallback.
+ * Names come from DetectUsbBridgeType comments — no extra VID table. */
+
+/* ATA SSD: nSSDTotalWritesGB is vendor RAW, typically GiB (attr E9/F9). */
+static void FormatAtaWrites(int nGiB, char* szBuf, int nBufLen)
+{
+    if (nGiB < 0) { szBuf[0] = '\0'; return; }
+    if (nGiB >= 1024)
+        _snprintf(szBuf, nBufLen, "%.1f ТБ", (double)nGiB / 1024.0);
+    else
+        _snprintf(szBuf, nBufLen, "%d ГБ", nGiB);
+}
+
+/* Crystal-style headline from ATA SMART (A9/E7 life left, E9/F9 NAND writes).
+ * Износ = 100 − остаток ресурса, как Percentage Used у NVMe. */
+static BOOL FormatAtaSsdSmartLine(const DRIVE_INFO* pInfo, char* szBuf, int nBufLen)
+{
+    char szTbw[32];
+    int nWear;
+    if (!pInfo || nBufLen <= 0) return FALSE;
+    szBuf[0] = '\0';
+    if (pInfo->nSSDLifeLeft < 0 && pInfo->nSSDTotalWritesGB < 0)
+        return FALSE;
+    if (pInfo->nSSDTotalWritesGB >= 0)
+        FormatAtaWrites(pInfo->nSSDTotalWritesGB, szTbw, sizeof(szTbw));
+    else
+        _snprintf(szTbw, sizeof(szTbw), "н/д");
+    if (pInfo->nSSDLifeLeft >= 0 && pInfo->nSSDLifeLeft <= 100) {
+        nWear = 100 - pInfo->nSSDLifeLeft;
+        _snprintf(szBuf, nBufLen, "Ресурс %d%%  ·  Износ %d%%  ·  Записано %s",
+                  pInfo->nSSDLifeLeft, nWear, szTbw);
+        return TRUE;
+    }
+    _snprintf(szBuf, nBufLen, "Записано %s", szTbw);
+    return TRUE;
+}
+
+static void FormatUsbAdapterName(const DRIVE_INFO* p, char* szBuf, int nBufLen)
+{
+    const char* chip = NULL;
+    if (!p || nBufLen <= 0) return;
+    szBuf[0] = '\0';
+
+    /* SCSI INQUIRY on SAT often returns the *disk* (Kingston A400), not the
+     * USB chip. Skip it when it matches the drive model. Prefer USB VID. */
+    {
+        BOOL inqIsDisk = FALSE;
+        if (p->szBridgeProduct[0] && p->szModel[0] &&
+            (strstr(p->szModel, p->szBridgeProduct) ||
+             strstr(p->szBridgeProduct, p->szModel)))
+            inqIsDisk = TRUE;
+        if (!inqIsDisk && p->szBridgeProduct[0]) {
+            const char* pr = p->szBridgeProduct;
+            if (strstr(pr, "RTL") || strstr(pr, "ASM") || strstr(pr, "JMS") ||
+                strstr(pr, "Realtek") || strstr(pr, "ASMedia") ||
+                strstr(pr, "JMicron")) {
+                if (p->szBridgeVendor[0])
+                    _snprintf(szBuf, nBufLen, "%s %s", p->szBridgeVendor, pr);
+                else
+                    _snprintf(szBuf, nBufLen, "%s", pr);
+                return;
+            }
+        }
+    }
+
+    if (p->wUsbVid == 0x0BDA) {
+        if (p->wUsbPid == 0x9210 || p->wUsbPid == 0x9211)
+            _snprintf(szBuf, nBufLen, "Realtek RTL9210 (%04X:%04X)",
+                      (unsigned)p->wUsbVid, (unsigned)p->wUsbPid);
+        else if (p->wUsbPid)
+            _snprintf(szBuf, nBufLen, "Realtek (%04X:%04X)",
+                      (unsigned)p->wUsbVid, (unsigned)p->wUsbPid);
+        else
+            _snprintf(szBuf, nBufLen, "Realtek");
+        return;
+    }
+    if (p->wUsbVid == 0x152D) {
+        _snprintf(szBuf, nBufLen, "JMicron (%04X:%04X)",
+                  (unsigned)p->wUsbVid, (unsigned)p->wUsbPid);
+        return;
+    }
+    if (p->wUsbVid == 0x174C) {
+        _snprintf(szBuf, nBufLen, "ASMedia (%04X:%04X)",
+                  (unsigned)p->wUsbVid, (unsigned)p->wUsbPid);
+        return;
+    }
+
+    switch (p->eUsbBridgeType) {
+    case USB_BRIDGE_NVME_JMICRON: chip = "JMicron JMS583"; break;
+    case USB_BRIDGE_NVME_ASMEDIA: chip = "ASMedia ASM2362"; break;
+    case USB_BRIDGE_NVME_REALTEK: chip = "Realtek RTL9210"; break;
+    case USB_BRIDGE_NVME_VLI:     chip = "VLI VL716"; break;
+    case USB_BRIDGE_NVME_FMA:     chip = "FMA NL6221"; break;
+    case USB_BRIDGE_ASM1352R:     chip = "ASMedia ASM1352R"; break;
+    case USB_BRIDGE_JMICRON:      chip = "JMicron"; break;
+    case USB_BRIDGE_SUNPLUS:      chip = "Sunplus"; break;
+    case USB_BRIDGE_CYPRESS:      chip = "Cypress"; break;
+    case USB_BRIDGE_IO_DATA:      chip = "I-O Data"; break;
+    case USB_BRIDGE_LOGITEC:      chip = "Logitec"; break;
+    case USB_BRIDGE_PROLIFIC:     chip = "Prolific"; break;
+    case USB_BRIDGE_SAT:          chip = "SAT"; break;
+    default: break;
+    }
+
+    if (chip && p->wUsbVid && p->wUsbPid)
+        _snprintf(szBuf, nBufLen, "%s (%04X:%04X)", chip,
+                  (unsigned)p->wUsbVid, (unsigned)p->wUsbPid);
+    else if (chip)
+        _snprintf(szBuf, nBufLen, "%s", chip);
+    else if (p->szBridgeVendor[0])
+        _snprintf(szBuf, nBufLen, "%s", p->szBridgeVendor);
+    else if (p->wUsbVid && p->wUsbPid)
+        _snprintf(szBuf, nBufLen, "VID:%04X PID:%04X",
+                  (unsigned)p->wUsbVid, (unsigned)p->wUsbPid);
+    else
+        _snprintf(szBuf, nBufLen, "—");
+}
+
 DRIVE_INFO  g_Drives[MAX_DRIVES];
 int         g_nDriveCount    = 0;
 int         g_nSelectedDrive = 0;
@@ -1342,29 +1472,8 @@ static BOOL BridgeLooksLikeEnclosure(const DRIVE_INFO* p)
 
 static BOOL IsLikelyUsbFlash(const DRIVE_INFO* p)
 {
-    char hay[384];
-    BOOL flashName, smallCap, unknownBridge;
     if (!p || !p->bIsUSB || p->bSMART_Supported) return FALSE;
-    if (BridgeLooksLikeEnclosure(p)) return FALSE;
-
-    _snprintf(hay, sizeof(hay), "%s %s %s",
-              p->szModel, p->szBridgeVendor, p->szBridgeProduct);
-    flashName =
-        (strstr(hay, "SanDisk") || strstr(hay, "SANDISK") ||
-         strstr(hay, "Kingston") || strstr(hay, "KINGSTON") ||
-         strstr(hay, "Transcend") || strstr(hay, "TRANSCEND") ||
-         strstr(hay, "Cruzer") || strstr(hay, "DataTraveler") ||
-         strstr(hay, "JetFlash") || strstr(hay, "Flash Drive") ||
-         strstr(hay, "USB DISK") || strstr(hay, "USB Flash") ||
-         strstr(hay, "3.2Gen") || strstr(hay, "Ultra Fit") ||
-         strstr(hay, "UFD") != NULL);
-    /* capacity in MB; treat < ~128 GB as flash-sized */
-    smallCap = (p->dwCapacityMB > 0 && p->dwCapacityMB < (128u * 1024u));
-    unknownBridge = (p->eUsbBridgeType == USB_BRIDGE_UNKNOWN ||
-                     p->eUsbBridgeType == USB_BRIDGE_SAT);
-    if (flashName && (smallCap || unknownBridge)) return TRUE;
-    if (unknownBridge && smallCap) return TRUE;
-    return FALSE;
+    return IsLikelyUsbFlashDrive(p);
 }
 
 void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
@@ -1377,6 +1486,7 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
         SetDlgItemTextU8(hWnd, IDC_TEMP_STATIC,        "-");
         SetDlgItemTextU8(hWnd, IDC_STATUS_STATIC,      "Нет данных");
         SetDlgItemTextU8(hWnd, IDC_READ_SPEED_STATIC,  "-");  /* protocol */
+        SetDlgItemTextU8(hWnd, IDC_ADAPTER_STATIC,     "—");
 
         SetDlgItemTextU8(hWnd, IDC_PREDICT_STATIC,     "");
         return;
@@ -1409,10 +1519,14 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
     SetDlgItemTextU8(hWnd, IDC_TEMP_STATIC, szBuf);
 
     if (pInfo->bIsNVMe && pInfo->bSMART_Supported) {
+        char szTbw[32];
+        FormatNvmeHostBytes(NVMeRead128Lo(pInfo->nvmeHealth.DataUnitsWritten),
+                            szTbw, sizeof(szTbw));
         _snprintf(szBuf, sizeof(szBuf),
-            "NVMe Health Log   запас %d%%   износ %d%%",
+            "Запас %d%%  ·  Износ %d%%  ·  Записано %s",
             (int)pInfo->nvmeHealth.AvailableSpare,
-            (int)pInfo->nvmeHealth.PercentageUsed);
+            (int)pInfo->nvmeHealth.PercentageUsed,
+            szTbw);
     } else if (pInfo->bIsNVMe && !pInfo->bSMART_Supported) {
         _snprintf(szBuf, sizeof(szBuf), "NVMe Health Log ошибка (err %lu)",
             pInfo->dwErrNvmeProtocol);
@@ -1428,13 +1542,15 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
             /* No ATA attribute table was populated — this came from the
              * SCSI LOG SENSE fallback only (temperature / failure flag). */
             _snprintf(szBuf, sizeof(szBuf), "USB, ограничено (SCSI Log Sense)");
-        } else {
+        } else if (!FormatAtaSsdSmartLine(pInfo, szBuf, sizeof(szBuf))) {
             _snprintf(szBuf, sizeof(szBuf), "USB SAT, %s",
                       pInfo->bSMART_Enabled ? "включён" : "обнаружен");
         }
     } else if (pInfo->bSMART_Supported) {
-        _snprintf(szBuf, sizeof(szBuf), "%s",
-                  pInfo->bSMART_Enabled ? "Поддерживается, включён" : "Поддерживается, выключен");
+        if (!FormatAtaSsdSmartLine(pInfo, szBuf, sizeof(szBuf))) {
+            _snprintf(szBuf, sizeof(szBuf), "%s",
+                      pInfo->bSMART_Enabled ? "Поддерживается, включён" : "Поддерживается, выключен");
+        }
     } else {
         _snprintf(szBuf, sizeof(szBuf), "Не поддерживается");
     }
@@ -1442,6 +1558,14 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
 
     SetDlgItemTextU8(hWnd, IDC_READ_SPEED_STATIC,
                     pInfo->szProtocol[0] ? pInfo->szProtocol : "-");
+
+    if (pInfo->bIsUSB) {
+        char szAdapter[64];
+        FormatUsbAdapterName(pInfo, szAdapter, sizeof(szAdapter));
+        SetDlgItemTextU8(hWnd, IDC_ADAPTER_STATIC, szAdapter);
+    } else {
+        SetDlgItemTextU8(hWnd, IDC_ADAPTER_STATIC, "—");
+    }
 
     char szReason[256];
     szReason[0] = '\0';
@@ -1478,13 +1602,12 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
     }
 
     if (pInfo->bIsUSB && !pInfo->bSMART_Supported) {
-        char szBridge[64];
-        if (pInfo->szBridgeVendor[0] || pInfo->szBridgeProduct[0]) {
-            _snprintf(szBridge, sizeof(szBridge), " [%s %s]",
-                pInfo->szBridgeVendor, pInfo->szBridgeProduct);
-        } else {
+        char szBridge[80], szName[64];
+        FormatUsbAdapterName(pInfo, szName, sizeof(szName));
+        if (szName[0] && strcmp(szName, "—") != 0)
+            _snprintf(szBridge, sizeof(szBridge), " [%s]", szName);
+        else
             szBridge[0] = '\0';
-        }
 
         DWORD dwErr = pInfo->dwErrSat16;
         if (dwErr == 0) dwErr = pInfo->dwErrSat12;
@@ -1974,13 +2097,11 @@ void UpdateAttrList(HWND hWnd, int nDriveIdx)
         NVME_ROW("05h","Износ",szPctU,
             (pLog->PercentageUsed>=100?"ПЛОХО":"ОК"));
 
-        if (qwDataRead>2048) _snprintf(szDUR,sizeof(szDUR),"%llu GB",(unsigned __int64)(qwDataRead/2048));
-        else                  _snprintf(szDUR,sizeof(szDUR),"%llu ед.",qwDataRead);
-        NVME_ROW("06h","Прочитано",szDUR,"ОК");
+        FormatNvmeHostBytes(qwDataRead, szDUR, sizeof(szDUR));
+        NVME_ROW("06h","Прочитано (host)",szDUR,"ОК");
 
-        if (qwDataWritten>2048) _snprintf(szDUW,sizeof(szDUW),"%llu GB",(unsigned __int64)(qwDataWritten/2048));
-        else                     _snprintf(szDUW,sizeof(szDUW),"%llu ед.",qwDataWritten);
-        NVME_ROW("07h","Записано",szDUW,"ОК");
+        FormatNvmeHostBytes(qwDataWritten, szDUW, sizeof(szDUW));
+        NVME_ROW("07h","Записано (host)",szDUW,"ОК");
 
         _snprintf(szPOH,sizeof(szPOH),"%llu ч",qwPOH);
         NVME_ROW("09h","Часы работы",szPOH,"ОК");
@@ -2540,7 +2661,7 @@ void CreateControls(HWND hWnd)
     int nInfoY   = 36;
     int nInfoH   = 18;
     int nInfoGap = 4;
-    int nLblW    = 90;
+    int nLblW    = 100;
     int nValX    = nInfoX + nLblW + 4;
     int nValW    = WINDOW_W - nValX - 8;
 
@@ -2621,6 +2742,17 @@ void CreateControls(HWND hWnd)
         hWnd, (HMENU)IDC_READ_SPEED_STATIC, g_hInst, NULL);
       SendMessage(h, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE); }
 
+    { HWND h = CreateWindowExU8(0, "STATIC", "Переходник",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        nInfoX, nInfoY + (nInfoH + nInfoGap) * 7, nLblW, nInfoH,
+        hWnd, (HMENU)IDC_ADAPTER_LABEL, g_hInst, NULL);
+      SendMessage(h, WM_SETFONT, (WPARAM)g_hFontSmall, TRUE); }
+    { HWND h = CreateWindowExU8(0, "STATIC", "—",
+        WS_CHILD | WS_VISIBLE | SS_LEFT,
+        nValX, nInfoY + (nInfoH + nInfoGap) * 7, nValW, nInfoH,
+        hWnd, (HMENU)IDC_ADAPTER_STATIC, g_hInst, NULL);
+      SendMessage(h, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE); }
+
     HWND hPred = CreateWindowExU8(0, "STATIC", "",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         nRightX, 240, 430, 17,
@@ -2631,7 +2763,7 @@ void CreateControls(HWND hWnd)
     HWND hList = CreateWindowExW(
         WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
         WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER,
-        nRightX, 262, 540, 340,
+        nRightX, 265, 540, 340,
         hWnd, (HMENU)IDC_ATTR_LIST, g_hInst, NULL
     );
     SendMessage(hList, WM_SETFONT, (WPARAM)g_hFontSmall, TRUE);
@@ -2683,7 +2815,7 @@ static LRESULT HandleCtlColor(HWND hWnd, WPARAM wParam)
         if (id == IDC_MODEL_LABEL    || id == IDC_SERIAL_LABEL   ||
             id == IDC_FIRMWARE_LABEL || id == IDC_SIZE_LABEL      ||
             id == IDC_TEMP_LABEL     || id == IDC_STATUS_LABEL    ||
-            id == IDC_READ_SPEED_LABEL) {
+            id == IDC_READ_SPEED_LABEL || id == IDC_ADAPTER_LABEL) {
             SetTextColor(hdc, CLR_TEXT_DIM);
             SetBkColor(hdc, CLR_BG);
             return (LRESULT)g_hbrBG;
@@ -3024,16 +3156,16 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 if (hReread) SetWindowPos(hReread, NULL, nRightX, 160, 140, 24, SWP_NOZORDER);
             }
 
-            int nLblW2  = 90;
+            int nLblW2  = 100;
             int nValX2  = nInfoX + nLblW2 + 4;
             int nValW2  = cxClient - nValX2 - 8;
             if (nValW2 < 40) nValW2 = 40;
             int nInfoY2 = 36, nInfoH2 = 18, nInfoGap2 = 4;
             { int lblIds[] = { IDC_MODEL_LABEL, IDC_SERIAL_LABEL, IDC_FIRMWARE_LABEL,
                                IDC_SIZE_LABEL, IDC_TEMP_LABEL, IDC_STATUS_LABEL,
-                               IDC_READ_SPEED_LABEL };
+                               IDC_READ_SPEED_LABEL, IDC_ADAPTER_LABEL };
               int k2;
-              for (k2 = 0; k2 < 7; k2++) {
+              for (k2 = 0; k2 < 8; k2++) {
                   HWND hL = GetDlgItem(hWnd, lblIds[k2]);
                   if (hL) SetWindowPos(hL, NULL, nInfoX,
                       nInfoY2 + (nInfoH2 + nInfoGap2) * k2, nLblW2, nInfoH2, SWP_NOZORDER);
@@ -3042,20 +3174,20 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
             { int valIds[] = { IDC_MODEL_STATIC, IDC_SERIAL_STATIC, IDC_FIRMWARE_STATIC,
                                IDC_SIZE_STATIC, IDC_TEMP_STATIC, IDC_STATUS_STATIC,
-                               IDC_READ_SPEED_STATIC };
+                               IDC_READ_SPEED_STATIC, IDC_ADAPTER_STATIC };
               int k3;
-              for (k3 = 0; k3 < 7; k3++) {
+              for (k3 = 0; k3 < 8; k3++) {
                   HWND hV = GetDlgItem(hWnd, valIds[k3]);
                   if (hV) SetWindowPos(hV, NULL, nValX2,
                       nInfoY2 + (nInfoH2 + nInfoGap2) * k3, nValW2, nInfoH2, SWP_NOZORDER);
               }
             }
             HWND hPred = GetDlgItem(hWnd, IDC_PREDICT_STATIC);
-            if (hPred) SetWindowPos(hPred, NULL, nRightX, 218, cxClient - nRightX - 8, 17, SWP_NOZORDER);
+            if (hPred) SetWindowPos(hPred, NULL, nRightX, 240, cxClient - nRightX - 8, 17, SWP_NOZORDER);
 
             HWND hList = GetDlgItem(hWnd, IDC_ATTR_LIST);
             if (hList) {
-                int nListTop = 243;
+                int nListTop = 265;
                 int nListH   = cyClient - nListTop - 8;
                 if (nListH < 50) nListH = 50;
                 int nListW = cxClient - nRightX - 8;

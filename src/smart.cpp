@@ -309,9 +309,8 @@ static BOOL IsRealtekNvmeUsbBridge(const DRIVE_INFO* p)
     if (!p) return FALSE;
     if (p->eUsbBridgeType == USB_BRIDGE_NVME_REALTEK)
         return TRUE;
-    if (p->wUsbVid == 0x0BDA &&
-        (p->wUsbPid == 0x9210 || p->wUsbPid == 0x9211 ||
-         p->wUsbPid == 0x9220 || p->wUsbPid == 0x9221))
+    /* Any Realtek USB storage VID — SAT first, then 0xE4. */
+    if (p->wUsbVid == 0x0BDA)
         return TRUE;
     _snprintf(hay, sizeof(hay), "%s %s %s",
               p->szModel, p->szBridgeVendor, p->szBridgeProduct);
@@ -3246,6 +3245,18 @@ void ExtractSSDIndicators(DRIVE_INFO* pInfo)
             if (pInfo->nSSDTotalWritesGB < 0)
                 pInfo->nSSDTotalWritesGB = (int)GetRawValue(pA->bRawValue);
             break;
+        /* Host writes: 48-bit LBA count (512 B). Skip tiny RAWs (vendor packing). */
+        case 0xF1:
+        case 0xF3: {
+            unsigned __int64 nLBA, nGiB;
+            if (pInfo->nSSDTotalWritesGB >= 0) break;
+            nLBA = GetRawValue48(pA->bRawValue);
+            if (nLBA < 2048ULL) break;
+            nGiB = nLBA / (1024ULL * 1024ULL * 2ULL);
+            if (nGiB > 4000000ULL) nGiB = 4000000ULL;
+            pInfo->nSSDTotalWritesGB = (int)nGiB;
+            break;
+        }
 
         /* Average erase count */
         case 0xA7:
@@ -3546,9 +3557,10 @@ USB_BRIDGE_TYPE DetectUsbBridgeType(HANDLE hDrive, DRIVE_INFO* pInfo)
         return USB_BRIDGE_SAT;  /* Other ASMedia → standard SAT */
     }
 
-    /* Realtek bridges */
+    /* Realtek bridges (RTL9210/B dual-mode and other USB-SATA) */
     if (vid == 0x0BDA) {
-        if (pid == 0x9210 || pid == 0x9220 || pid == 0x9221)
+        if ((pid & 0xFF00) == 0x9200 || pid == 0x9210 || pid == 0x9211 ||
+            pid == 0x9220 || pid == 0x9221)
             return USB_BRIDGE_NVME_REALTEK;
         return USB_BRIDGE_SAT;
     }
@@ -4261,6 +4273,11 @@ static BOOL UsbBridgeLooksLikeEnclosure(const DRIVE_INFO* p)
 {
     char hay[384];
     if (!p) return FALSE;
+    /* USB VID of known enclosure chips — even when INQUIRY is the disk. */
+    if (p->wUsbVid == 0x0BDA || p->wUsbVid == 0x152D || p->wUsbVid == 0x174C ||
+        p->wUsbVid == 0x2109 || p->wUsbVid == 0x13FD || p->wUsbVid == 0x1058 ||
+        p->wUsbVid == 0x0BC2)
+        return TRUE;
     switch (p->eUsbBridgeType) {
     case USB_BRIDGE_NVME_JMICRON:
     case USB_BRIDGE_NVME_ASMEDIA:
@@ -4298,10 +4315,15 @@ BOOL IsLikelyUsbFlashDrive(const DRIVE_INFO* p)
 
     _snprintf(hay, sizeof(hay), "%s %s %s",
               p->szModel, p->szBridgeVendor, p->szBridgeProduct);
-    if (strstr(hay, "SanDisk") || strstr(hay, "SANDISK") ||
-        strstr(hay, "Kingston") || strstr(hay, "KINGSTON") ||
-        strstr(hay, "Transcend") || strstr(hay, "TRANSCEND") ||
-        strstr(hay, "Cruzer") || strstr(hay, "DataTraveler") ||
+
+    /* SATA/NVMe SSD in an enclosure (Kingston A400, etc.) is NOT a stick. */
+    if (strstr(hay, "A400") || strstr(hay, "SA400") ||
+        strstr(hay, "SSD") || strstr(hay, "NVMe") || strstr(hay, "NVME"))
+        return FALSE;
+
+    /* Brand alone is not enough: Kingston/SanDisk also make SATA SSDs.
+     * Match flash product names only. */
+    if (strstr(hay, "Cruzer") || strstr(hay, "DataTraveler") ||
         strstr(hay, "JetFlash") || strstr(hay, "Flash Drive") ||
         strstr(hay, "USB DISK") || strstr(hay, "USB Flash") ||
         strstr(hay, "3.2Gen") || strstr(hay, "Ultra Fit") ||
@@ -4535,23 +4557,80 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
                 }
             }
             else if (bridge == USB_BRIDGE_NVME_JMICRON) {
-                /* NVMe via JMicron bridge (JMS583/586) */
-                if (NVMeIdentifyJMicron(hDrive, pInfo)) {
-                    if (NVMeHealthLogJMicron(hDrive, pInfo)) {
+                /* JMS583/586 dual-mode (SATA via SAT, NVMe via vendor).
+                 * SAT first like RTL9210: enclosure may hold a SATA SSD.
+                 * One-shot JMicron identify+health only if SAT SMART failed.
+                 * Stay USB so RefreshDriveSmart never native-IOCTLs it.
+                 * Do NOT TryAll, GetNVMeHealthLogEx, or NvmeMini. */
+                BOOL got = FALSE;
+
+                if (AcquireATASMART(hDrive, nDrive, pInfo, TRUE) &&
+                    pInfo->attrData.stAttributes[0].bAttrID != 0) {
+                    got = TRUE;
+                    pInfo->bSMART_Supported = TRUE;
+                    pInfo->bIsNVMe = FALSE;
+                    pInfo->bIsUSB = TRUE;
+                    pInfo->eType = DetectDriveType(hDrive, pInfo);
+                    pInfo->nHealthPercent = CalculateHealth(pInfo);
+                    pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
+                }
+
+                if (!got) {
+                    if (NVMeIdentifyJMicron(hDrive, pInfo) &&
+                        NVMeHealthLogJMicron(hDrive, pInfo)) {
                         ExtractNVMeExtendedInfo(pInfo);
                         pInfo->bIsNVMe = TRUE;
+                        pInfo->bIsUSB = TRUE;
                         pInfo->eType = DRIVE_TYPE_NVME;
+                        pInfo->bSMART_Supported = TRUE;
+                        pInfo->nHealthPercent = CalculateHealthNVMe(pInfo);
+                        pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
+                        got = TRUE;
                     }
+                }
+
+                if (!got) {
+                    pInfo->bSMART_Supported = FALSE;
+                    pInfo->bIsNVMe = FALSE;
+                    pInfo->eType = DRIVE_TYPE_USB;
                 }
             }
             else if (bridge == USB_BRIDGE_NVME_ASMEDIA) {
-                /* NVMe via ASMedia bridge (ASM2362) */
-                if (NVMeIdentifyASMedia(hDrive, pInfo)) {
-                    if (NVMeHealthLogASMedia(hDrive, pInfo)) {
+                /* ASM2362 dual-mode (SATA via SAT, NVMe via vendor).
+                 * SAT first like RTL9210. One-shot ASMedia identify+health
+                 * only if SAT SMART failed. Stay USB. Do NOT TryAll,
+                 * GetNVMeHealthLogEx, or NvmeMini. */
+                BOOL got = FALSE;
+
+                if (AcquireATASMART(hDrive, nDrive, pInfo, TRUE) &&
+                    pInfo->attrData.stAttributes[0].bAttrID != 0) {
+                    got = TRUE;
+                    pInfo->bSMART_Supported = TRUE;
+                    pInfo->bIsNVMe = FALSE;
+                    pInfo->bIsUSB = TRUE;
+                    pInfo->eType = DetectDriveType(hDrive, pInfo);
+                    pInfo->nHealthPercent = CalculateHealth(pInfo);
+                    pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
+                }
+
+                if (!got) {
+                    if (NVMeIdentifyASMedia(hDrive, pInfo) &&
+                        NVMeHealthLogASMedia(hDrive, pInfo)) {
                         ExtractNVMeExtendedInfo(pInfo);
                         pInfo->bIsNVMe = TRUE;
+                        pInfo->bIsUSB = TRUE;
                         pInfo->eType = DRIVE_TYPE_NVME;
+                        pInfo->bSMART_Supported = TRUE;
+                        pInfo->nHealthPercent = CalculateHealthNVMe(pInfo);
+                        pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
+                        got = TRUE;
                     }
+                }
+
+                if (!got) {
+                    pInfo->bSMART_Supported = FALSE;
+                    pInfo->bIsNVMe = FALSE;
+                    pInfo->eType = DRIVE_TYPE_USB;
                 }
             }
             else if (bridge == USB_BRIDGE_NVME_VLI) {
@@ -4569,12 +4648,14 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
                 !IsRealtekNvmeUsbBridge(pInfo) &&
                 bridge != USB_BRIDGE_NVME_REALTEK &&
                 bridge != USB_BRIDGE_NVME_FMA &&
+                bridge != USB_BRIDGE_NVME_JMICRON &&
+                bridge != USB_BRIDGE_NVME_ASMEDIA &&
                 bridge != USB_BRIDGE_JMICRON &&
                 bridge != USB_BRIDGE_SUNPLUS && bridge != USB_BRIDGE_CYPRESS &&
                 bridge != USB_BRIDGE_IO_DATA && bridge != USB_BRIDGE_LOGITEC &&
                 bridge != USB_BRIDGE_PROLIFIC) {
                 /* Try generic NVMe-over-USB detection.
-                 * Never shotgun vendor cmds at RTL9210. */
+                 * Never shotgun vendor cmds at RTL9210 / JMS583 / ASM2362. */
                 if (NVMeOverUSBTryAll(hDrive, pInfo)) {
                     ExtractNVMeExtendedInfo(pInfo);
                     pInfo->bIsNVMe = TRUE;
@@ -4583,12 +4664,15 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
             }
 
             /* If not NVMe-over-USB, or NVMe detection failed, try SATA SMART via SAT.
-             * Realtek RTL9210/FMA: SAT+0xE4 already handled above; no TryAll,
-             * GetNVMeHealthLogEx, or second AcquireATASMART. */
+             * Realtek RTL9210/FMA and JMicron/ASMedia NVMe: SAT + one vendor
+             * passthrough already handled above; no TryAll, GetNVMeHealthLogEx,
+             * or second AcquireATASMART. */
             if (!pInfo->bIsNVMe &&
                 !IsRealtekNvmeUsbBridge(pInfo) &&
                 bridge != USB_BRIDGE_NVME_REALTEK &&
-                bridge != USB_BRIDGE_NVME_FMA) {
+                bridge != USB_BRIDGE_NVME_FMA &&
+                bridge != USB_BRIDGE_NVME_JMICRON &&
+                bridge != USB_BRIDGE_NVME_ASMEDIA) {
                 if (pInfo->bSMART_Supported) {
                     AcquireATASMART(hDrive, nDrive, pInfo, TRUE);
                 } else {

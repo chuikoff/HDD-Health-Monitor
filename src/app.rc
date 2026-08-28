@@ -34,8 +34,8 @@ IDI_HDD      ICON  "app.ico"
  *  elsewhere in the project.
  * ---------------------------------------------------------------------------- */
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION    1,2,0,0
- PRODUCTVERSION 1,2,0,0
+ FILEVERSION    1,3,0,0
+ PRODUCTVERSION 1,3,0,0
  FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
  FILEFLAGS      0x0L
  FILEOS         VOS_NT_WINDOWS32
@@ -47,13 +47,13 @@ BEGIN
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName",      "ARImetic Inc."
-            VALUE "FileDescription",  "HDDHealth Monitor 1.2 (chuikoff fork) - SMART viewer"
-            VALUE "FileVersion",      "1.2.0.0"
-            VALUE "InternalName",     "HDD Health Monitor 1.2"
+            VALUE "FileDescription",  "HDDHealth Monitor 1.3 (chuikoff fork) - SMART viewer"
+            VALUE "FileVersion",      "1.3.0.0"
+            VALUE "InternalName",     "HDD Health Monitor 1.3"
             VALUE "LegalCopyright",   "Copyright (c) 2026 Ari Sohandri Putra. MIT License."
             VALUE "OriginalFilename", "HDDHealthMonitor.exe"
-            VALUE "ProductName",      "HDDHealth Monitor 1.2"
-            VALUE "ProductVersion",   "1.2.0.0"
+            VALUE "ProductName",      "HDDHealth Monitor 1.3"
+            VALUE "ProductVersion",   "1.3.0.0"
             VALUE "Comments",         "100% Free Open Source Software. Author: Ari Sohandri Putra (ARImetic Inc.). Sponsor: https://github.com/sponsors/arisohandriputra/"
         END
     END

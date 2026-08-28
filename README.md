@@ -14,7 +14,9 @@ This fork keeps the original name and UI. MIT does not require a rename or a red
 
 - Skips `IOCTL_STORAGE_PROTOCOL_COMMAND` on the default NVMe path (avoids `nvme.sys` BSOD `DRIVER_IRQL_NOT_LESS_OR_EQUAL`)
 - Russian UI (UTF-16), Victoria-style SMART table (ID / Параметр / Значение / Худший / Порог / RAW / Статус)
-- USB RTL9210B: SAT first (SATA SSD), then one-shot vendor `0xE4` (NVMe). No native NVMe IOCTL on USB
+- USB Realtek/JMicron/ASMedia: SAT first (SATA SSD), then one vendor passthrough (NVMe). No native NVMe IOCTL on USB
+- USB adapter name from VID/PID (e.g. Realtek 0BDA:9201), not the disk model
+- NVMe Health Log like CrystalDiskInfo: spare, wear, host writes in TB. ATA SSD: remaining life + TBW (A9/E9/F1)
 - SMART is read once at start, on hotplug, and via **Перечитать**. No live monitoring, tray, graph, or surface test
 - Close on X quits the app. Window is resizable. Protocol shown (e.g. NVMe 1.2.1, SATA 6 Гбит/с)
 - Needs administrator rights
