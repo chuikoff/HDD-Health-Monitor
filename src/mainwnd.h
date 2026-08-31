@@ -37,8 +37,6 @@
 #define IDC_REFRESH_BTN      1010
 #define IDC_HEALTH_LABEL     1011
 #define IDC_PREDICT_STATIC   1012
-#define IDC_PERF_LABEL       1013
-#define IDC_PERF_BAR_FRAME   1014
 #define IDC_TEMP_STATIC        1015
 #define IDC_READ_SPEED_STATIC  1016
 
@@ -50,14 +48,16 @@
 #define IDC_STATUS_LABEL       1023
 #define IDC_READ_SPEED_LABEL   1024
 #define IDC_REREAD_BTN         1026
+#define IDC_REPORT_BTN         1035
 #define IDC_DRIVE_BTN_BASE   1100
 #define IDM_ABOUT            2001
 #define IDM_EXIT             2002
+#define IDM_REPORT           2003
 #define IDM_SCREENSHOT       2004
 #define IDM_DONATE           2006
 #define IDT_HOTPLUG          3002
 #define WM_APP_REFRESH_DONE  (WM_APP + 1)
-#define DRIVE_BTN_H    68
+#define DRIVE_BTN_H    56
 #define DRIVE_BTN_GAP   6
 #define DRIVE_BTN_PANEL_W 200
 #define WINDOW_W    920
@@ -82,7 +82,6 @@ extern int         g_nSelectedDrive;
 extern HINSTANCE   g_hInst;
 extern HWND        g_hMainWnd;
 extern HWND        g_hHealthBar;
-extern HWND        g_hPerfBar;
 extern HWND        g_hDriveBtn[MAX_DRIVES];
 extern HBRUSH  g_hbrBG;
 extern HBRUSH  g_hbrPanel;
@@ -95,7 +94,6 @@ extern HFONT   g_hFontSmall;
 extern HFONT   g_hFontBig;
 
 LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
-LRESULT CALLBACK PerfBarWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK HealthBarWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK DriveBtnWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 void    RegisterHealthBarClass(HINSTANCE hInst);
@@ -109,6 +107,7 @@ void    UpdateDriveInfo(HWND hWnd, int nDrive);
 void    UpdateAttrList(HWND hWnd, int nDrive);
 void    PaintMain(HWND hWnd, HDC hdc);
 void    ShowAboutDialog(HWND hWnd);
-COLORREF GetHealthColor(int nHealth);
+void    ShowHealthLectureDialog(HWND hParent);
+COLORREF GetHealthStatusColor(DRIVE_HEALTH_STATUS eStatus);
 
 #endif

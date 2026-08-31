@@ -34,6 +34,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <limits.h>
+#include <stdarg.h>
 #include <setupapi.h>
 #include <devguid.h>
 #include <regstr.h>
@@ -517,7 +519,7 @@ static unsigned __int64 ReadLE64(const BYTE* p)
     return v;
 }
 
-DWORD GetRawValue(BYTE* pRaw)
+DWORD GetRawValue(const BYTE* pRaw)
 {
     return ((DWORD)pRaw[3] << 24) |
            ((DWORD)pRaw[2] << 16) |
@@ -525,7 +527,7 @@ DWORD GetRawValue(BYTE* pRaw)
             (DWORD)pRaw[0];
 }
 
-unsigned __int64 GetRawValue48(BYTE* pRaw)
+unsigned __int64 GetRawValue48(const BYTE* pRaw)
 {
     return ((unsigned __int64)pRaw[5] << 40) |
            ((unsigned __int64)pRaw[4] << 32) |
@@ -566,6 +568,8 @@ static BOOL IsBufferAllFF(const BYTE* p, int nLen)
  * SMART attribute name table
  * Comprehensive coverage of standard + vendor-specific attributes
  * ============================================================ */
+static const char* VendorSpecificAttrName(BYTE bID);
+
 const ATTR_NAME g_AttrNames[] = {
     /* ---- Standard ATA SMART attributes ---- */
     { 0x01, "Частота ошибок чтения",             ATTR_CRIT_ADVISORY,  INTERP_RATE         },
@@ -597,7 +601,7 @@ const ATTR_NAME g_AttrNames[] = {
 
     /* ---- SSD vendor-specific attributes (multiple vendors) ---- */
     { 0xA0, "Внезапные выключения",              ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xA1, "Использовано резервных блоков",     ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
+    { 0xA1, "Атрибут A1h (vendor-specific)",      ATTR_CRIT_NONE,      INTERP_COUNTER32    },
     { 0xA2, "Худший резервный блок",             ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
     { 0xA3, "Начальные плохие блоки",            ATTR_CRIT_NONE,      INTERP_COUNTER32    },
     { 0xA4, "Всего стираний",                    ATTR_CRIT_NONE,      INTERP_COUNTER32    },
@@ -605,16 +609,16 @@ const ATTR_NAME g_AttrNames[] = {
     { 0xA6, "Мин. стираний",                     ATTR_CRIT_NONE,      INTERP_COUNTER32    },
     { 0xA7, "Среднее стираний",                  ATTR_CRIT_NONE,      INTERP_COUNTER32    },
     { 0xA8, "Макс. стираний по спецификации",    ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xA9, "Остаток ресурса %",                 ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
+    { 0xA9, "Заявленный остаток ресурса",         ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
     { 0xAA, "Резервное пространство",            ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
     { 0xAB, "Ошибки программирования",           ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
     { 0xAC, "Ошибки стирания",                   ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
     { 0xAD, "Выравнивание износа",               ATTR_CRIT_NONE,      INTERP_COUNTER32    },
     { 0xAE, "Внезапная потеря питания",          ATTR_CRIT_NONE,      INTERP_COUNTER32    },
     { 0xAF, "Сбой защиты питания",               ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xB0, "Ошибки стирания (чип)",             ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
-    { 0xB1, "Разброс износа",                    ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xB2, "Использовано резервных блоков",     ATTR_CRIT_ADVISORY,  INTERP_COUNTER32    },
+    { 0xB0, "Атрибут B0h (vendor-specific)",      ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xB1, "Атрибут B1h (vendor-specific)",      ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xB2, "Атрибут B2h (vendor-specific)",      ATTR_CRIT_NONE,      INTERP_COUNTER32    },
     { 0xB3, "Использовано резервных блоков (всего)", ATTR_CRIT_ADVISORY, INTERP_COUNTER32 },
     { 0xB4, "Свободные резервные блоки",         ATTR_CRIT_NONE,      INTERP_COUNTER32    },
     { 0xB5, "Ошибки программирования (всего)",   ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
@@ -678,10 +682,10 @@ const ATTR_NAME g_AttrNames[] = {
     { 0xF2, "Прочитано LBA",                     ATTR_CRIT_NONE,      INTERP_COUNTER48    },
     { 0xF3, "Записано LBA (расш.)",              ATTR_CRIT_NONE,      INTERP_COUNTER48    },
     { 0xF4, "Прочитано LBA (расш.)",             ATTR_CRIT_NONE,      INTERP_COUNTER48    },
-    { 0xF5, "Мин. стираний (Samsung)",           ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xF6, "Макс. стираний (Samsung)",          ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xF7, "Среднее стираний (Samsung)",        ATTR_CRIT_NONE,      INTERP_COUNTER32    },
-    { 0xF8, "Выравнивание износа (Samsung)",     ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xF5, "Атрибут F5h (vendor-specific)",      ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xF6, "Атрибут F6h (vendor-specific)",      ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xF7, "Атрибут F7h (vendor-specific)",      ATTR_CRIT_NONE,      INTERP_COUNTER32    },
+    { 0xF8, "Атрибут F8h (vendor-specific)",      ATTR_CRIT_NONE,      INTERP_COUNTER32    },
     { 0xF9, "Записи NAND (ГиБ)",                 ATTR_CRIT_NONE,      INTERP_COUNTER32    },
     { 0xFA, "Повторы ошибок чтения",             ATTR_CRIT_ADVISORY,  INTERP_RATE         },
     { 0xFB, "Остаток запасных блоков",           ATTR_CRIT_ADVISORY,  INTERP_NORMAL       },
@@ -698,7 +702,7 @@ const ATTR_NAME g_AttrNames[] = {
 
     /* ---- Additional vendor-specific SSD attributes ---- */
     { 0xA0, "Температура (производитель)",       ATTR_CRIT_NONE,      INTERP_TEMPERATURE  },
-    { 0xA9, "Остаток ресурса SSD",               ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
+    { 0xA9, "Заявленный остаток ресурса",         ATTR_CRIT_ADVISORY,  INTERP_LIFE_PCT     },
 
     /* ---- Kingston SSD specific ---- */
     { 0xB6, "Ошибки стирания (Kingston)",        ATTR_CRIT_CRITICAL,  INTERP_COUNTER32    },
@@ -726,7 +730,7 @@ const char* GetAttrName(BYTE bID)
         if (g_AttrNames[i].bID == bID) return g_AttrNames[i].szName;
         i++;
     }
-    return "Неизвестный атрибут";
+    return VendorSpecificAttrName(bID);
 }
 
 /* Vendor overlay: only IDs whose name differs from generic g_AttrNames.
@@ -752,10 +756,14 @@ static const ATTR_OVERLAY g_OvSamsungSsd[] = {
     { 0xB7, "Плохие блоки (runtime)" },
     { 0xBB, "Неисправимые ошибки" },
     { 0xEB, "Защита от потери питания" },
+    { 0xF5, "Мин. стираний (Samsung)" },
+    { 0xF6, "Макс. стираний (Samsung)" },
+    { 0xF7, "Среднее стираний (Samsung)" },
+    { 0xF8, "Выравнивание износа (Samsung)" },
     { 0x00, NULL }
 };
 
-/* Kingston/Phison, ADATA (SMI/Phison), SK Hynix SATA, Toshiba/Kioxia SSD */
+/* Phison SATA SSD: E7 life remaining, E9 NAND writes */
 static const ATTR_OVERLAY g_OvPhisonSsd[] = {
     { 0xE7, "Остаток ресурса SSD" },
     { 0xE9, "Записи NAND (ГиБ)" },
@@ -793,40 +801,392 @@ static const char* LookupOverlay(const ATTR_OVERLAY* tab, BYTE bID)
     return NULL;
 }
 
-static const ATTR_OVERLAY* OverlayFor(DRIVE_VENDOR v, DRIVE_TYPE t)
+static const ATTR_OVERLAY* OverlayFor(const DRIVE_INFO* p)
 {
-    BOOL ssd = (t == DRIVE_TYPE_SSD_SATA || t == DRIVE_TYPE_M2_SATA);
-    BOOL hdd = (t == DRIVE_TYPE_HDD);
+    DRIVE_TYPE t;
+    DRIVE_CONTROLLER c;
+    BOOL ssd, hdd;
+    if (!p) return NULL;
+    t = p->eType;
+    c = p->eController;
+    ssd = (t == DRIVE_TYPE_SSD_SATA || t == DRIVE_TYPE_M2_SATA);
+    hdd = (t == DRIVE_TYPE_HDD);
     if (t == DRIVE_TYPE_NVME)
         return NULL;
 
-    switch (v) {
-    case VENDOR_SEAGATE:
-        return ssd ? NULL : g_OvSeagateHdd;
-    case VENDOR_SAMSUNG:
-        return hdd ? NULL : g_OvSamsungSsd;
-    case VENDOR_KINGSTON:
-    case VENDOR_ADATA:
-    case VENDOR_SKHYNIX:
-    case VENDOR_KIOXIA:
+    /* Overlays key off controller, not brand (Kingston A400 is Phison). */
+    switch (c) {
+    case CONTROLLER_PHISON:
         return g_OvPhisonSsd;
-    case VENDOR_TOSHIBA:
-        return ssd ? g_OvPhisonSsd : g_OvToshibaHdd;
-    case VENDOR_MICRON:
-        return g_OvMicronSsd;
-    case VENDOR_INTEL:
+    case CONTROLLER_SAMSUNG:
+        return hdd ? NULL : g_OvSamsungSsd;
+    case CONTROLLER_INTEL:
         return g_OvIntelSsd;
-    /* VENDOR_WDC / VENDOR_HITACHI: generic names already match WD/HGST HDD */
+    case CONTROLLER_MICRON:
+        return g_OvMicronSsd;
+    case CONTROLLER_SEAGATE:
+        return ssd ? NULL : g_OvSeagateHdd;
+    case CONTROLLER_TOSHIBA:
+        return ssd ? NULL : g_OvToshibaHdd;
     default:
-        return NULL;
+        break;
+    }
+    /* Seagate HDD brand + HDD type keeps the Seagate overlay even if the
+     * MCU was left UNKNOWN. Toshiba HDD CRC overlay similarly. */
+    if (hdd && p->eVendor == VENDOR_SEAGATE)
+        return g_OvSeagateHdd;
+    if (hdd && p->eVendor == VENDOR_TOSHIBA)
+        return g_OvToshibaHdd;
+    return NULL;
+}
+
+static char g_szVendorAttrName[256][48];
+static int  g_bVendorAttrNameReady = 0;
+
+static void InitVendorAttrNames(void)
+{
+    int i;
+    if (g_bVendorAttrNameReady) return;
+    for (i = 0; i < 256; i++) {
+        (void)_snprintf(g_szVendorAttrName[i], 48,
+                        "Атрибут %02Xh (vendor-specific)", i);
+        g_szVendorAttrName[i][47] = '\0';
+    }
+    g_bVendorAttrNameReady = 1;
+}
+
+static const char* VendorSpecificAttrName(BYTE bID)
+{
+    InitVendorAttrNames();
+    return g_szVendorAttrName[bID];
+}
+
+static BOOL IsPhisonFamily(const DRIVE_INFO* p)
+{
+    if (!p) return FALSE;
+    if (p->eController == CONTROLLER_PHISON)
+        return TRUE;
+    if (p->szFirmware[0] && strncmp(p->szFirmware, "HPS", 3) == 0)
+        return TRUE;
+    return FALSE;
+}
+
+static BOOL IsAtaSsdTypeInfo(const DRIVE_INFO* p)
+{
+    if (!p) return FALSE;
+    return p->eType == DRIVE_TYPE_SSD_SATA || p->eType == DRIVE_TYPE_M2_SATA;
+}
+
+BOOL DriveTreatsC0AsPowerLoss(const DRIVE_INFO* pInfo)
+{
+    if (!pInfo) return FALSE;
+    if (IsPhisonFamily(pInfo)) return TRUE;
+    if (IsAtaSsdTypeInfo(pInfo)) return TRUE;
+    return FALSE;
+}
+
+/* Vendor-SSD IDs whose RAW packing is not ATA-standard. BE/BF and F1-F4 stay out. */
+static BOOL IsVendorSpecificId(BYTE bID)
+{
+    if (bID == 0xBE || bID == 0xBF)
+        return FALSE;
+    if (bID >= 0xA0 && bID <= 0xBD)
+        return TRUE;
+    if (bID == 0xC3)
+        return TRUE;
+    if (bID >= 0xE7 && bID <= 0xF0)
+        return TRUE;
+    if (bID >= 0xF5 && bID <= 0xF8)
+        return TRUE;
+    return FALSE;
+}
+
+static RAW_ENC EncFromInterp(ATTR_INTERP e)
+{
+    switch (e) {
+    case INTERP_LIFE_PCT:    return RAW_ENC_PERCENT;
+    case INTERP_TEMPERATURE: return RAW_ENC_TEMP_C;
+    case INTERP_COUNTER32:   return RAW_ENC_COUNTER32;
+    case INTERP_COUNTER48:   return RAW_ENC_COUNTER48;
+    case INTERP_RATE:        return RAW_ENC_EVENTS;
+    case INTERP_DURATION:    return RAW_ENC_COUNTER32;
+    case INTERP_EVENT_COUNT: return RAW_ENC_EVENTS;
+    case INTERP_NORMAL:
+    default:                 return RAW_ENC_COUNTER32;
     }
 }
 
-const char* GetAttrNameEx(BYTE bID, DRIVE_VENDOR v, DRIVE_TYPE t)
+static void ApplyPhisonSsdDecode(BYTE bID, ATTR_DECODE* out)
 {
-    const char* s = LookupOverlay(OverlayFor(v, t), bID);
-    if (s) return s;
-    return GetAttrName(bID);
+    switch (bID) {
+    case 0xA0:
+        out->szName = "Внезапные выключения";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 70;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xA1:
+        out->szName = "Резервные блоки (осталось)";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 80;
+        out->eCrit = ATTR_CRIT_ADVISORY;
+        break;
+    case 0xA3:
+        out->szName = "Начальные плохие блоки";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 80;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xA4:
+        out->szName = "Всего стираний";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 80;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xA5:
+        out->szName = "Макс. стираний";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 80;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xA6:
+        out->szName = "Мин. стираний";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 80;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xA7:
+        out->szName = "Среднее стираний";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 80;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xA8:
+        out->szName = "Макс. стираний по спецификации";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 75;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xA9:
+        out->szName = "Заявленный остаток ресурса";
+        out->eEnc = RAW_ENC_PERCENT;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 85;
+        out->eCrit = ATTR_CRIT_ADVISORY;
+        break;
+    case 0xAF:
+        out->szName = "Сбой защиты питания";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 70;
+        out->eCrit = ATTR_CRIT_CRITICAL;
+        break;
+    case 0xC0:
+        out->szName = "Аварийные отключения питания";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 80;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xB0:
+        out->szName = "Ошибки стирания (худший кристалл)";
+        out->eEnc = RAW_ENC_UNKNOWN;
+        out->eState = ATTR_DECODE_UNKNOWN;
+        out->nSemanticConfidence = 70;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xB1:
+        out->szName = "Всего циклов выравнивания износа";
+        out->eEnc = RAW_ENC_UNKNOWN;
+        out->eState = ATTR_DECODE_UNKNOWN;
+        out->nSemanticConfidence = 70;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xB2:
+        out->szName = "Резервные блоки (использовано)";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 70;
+        out->eCrit = ATTR_CRIT_ADVISORY;
+        break;
+    case 0xB5:
+        out->szName = "Ошибки программирования (всего)";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 85;
+        out->eCrit = ATTR_CRIT_CRITICAL;
+        break;
+    case 0xB6:
+        out->szName = "Ошибки стирания (всего)";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 85;
+        out->eCrit = ATTR_CRIT_CRITICAL;
+        break;
+    case 0xC3:
+        out->szName = "ECC (вендор)";
+        out->eEnc = RAW_ENC_UNKNOWN;
+        out->eState = ATTR_DECODE_UNKNOWN;
+        out->nSemanticConfidence = 50;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xE7:
+        out->szName = "Остаток ресурса SSD";
+        out->eEnc = RAW_ENC_PERCENT;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 80;
+        out->eCrit = ATTR_CRIT_ADVISORY;
+        break;
+    case 0xE8:
+        out->szName = "Резервное пространство";
+        out->eEnc = RAW_ENC_PERCENT;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 80;
+        out->eCrit = ATTR_CRIT_ADVISORY;
+        break;
+    case 0xE9:
+        out->szName = "Записи NAND (ГиБ)";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 75;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xF1:
+        out->szName = "Записано LBA";
+        out->eEnc = RAW_ENC_LBA;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 90;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xF2:
+        out->szName = "Прочитано LBA";
+        out->eEnc = RAW_ENC_LBA;
+        out->eState = ATTR_DECODE_KNOWN;
+        out->nSemanticConfidence = 90;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    case 0xF5:
+    case 0xF6:
+    case 0xF7:
+        out->szName = VendorSpecificAttrName(bID);
+        out->eEnc = RAW_ENC_UNKNOWN;
+        out->eState = ATTR_DECODE_UNKNOWN;
+        out->nSemanticConfidence = 0;
+        out->eCrit = ATTR_CRIT_NONE;
+        break;
+    default:
+        break;
+    }
+}
+
+void GetAttrDecode(BYTE bID, const DRIVE_INFO* pInfo, ATTR_DECODE* out)
+{
+    int i;
+    const char* ovl;
+    BOOL bOverlayTrustsEnc;
+
+    if (!out) return;
+    InitVendorAttrNames();
+    out->szName = VendorSpecificAttrName(bID);
+    out->eEnc = RAW_ENC_UNKNOWN;
+    out->eState = ATTR_DECODE_UNKNOWN;
+    out->nSemanticConfidence = 0;
+    out->eCrit = ATTR_CRIT_NONE;
+
+    i = 0;
+    while (g_AttrNames[i].szName != NULL) {
+        if (g_AttrNames[i].bID == bID) {
+            out->szName = g_AttrNames[i].szName;
+            out->eCrit = g_AttrNames[i].eCritLevel;
+            out->eEnc = EncFromInterp(g_AttrNames[i].eInterp);
+            out->nSemanticConfidence = 60;
+            break;
+        }
+        i++;
+    }
+
+    /* Well-known ATA encodings (name already from table). */
+    switch (bID) {
+    case 0x05: out->eEnc = RAW_ENC_SECTORS_LO16; break;
+    case 0x09: out->eEnc = RAW_ENC_HOURS; break;
+    case 0x04:
+    case 0x0C: out->eEnc = RAW_ENC_CYCLES; break;
+    case 0xC2:
+    case 0xBE: out->eEnc = RAW_ENC_TEMP_C; break;
+    case 0xC4: out->eEnc = RAW_ENC_EVENTS; break;
+    case 0xF1:
+    case 0xF2:
+    case 0xF3:
+    case 0xF4: out->eEnc = RAW_ENC_LBA; break;
+    default: break;
+    }
+
+    ovl = LookupOverlay(OverlayFor(pInfo), bID);
+    if (ovl)
+        out->szName = ovl;
+
+    /* Overlay on Samsung/Intel/Micron is a trusted profile for that ID.
+     * Phison overlay is names-only for E7/E9; encoding comes from ApplyPhison. */
+    bOverlayTrustsEnc = FALSE;
+    if (ovl && pInfo) {
+        switch (pInfo->eController) {
+        case CONTROLLER_SAMSUNG:
+        case CONTROLLER_INTEL:
+        case CONTROLLER_MICRON:
+            bOverlayTrustsEnc = TRUE;
+            break;
+        default:
+            break;
+        }
+    }
+
+    if (IsVendorSpecificId(bID) && !bOverlayTrustsEnc) {
+        BOOL bSsdLike = TRUE; /* no pInfo: do not claim a universal encoding */
+        if (pInfo) {
+            bSsdLike = (pInfo->eType == DRIVE_TYPE_SSD_SATA ||
+                        pInfo->eType == DRIVE_TYPE_M2_SATA ||
+                        pInfo->eType == DRIVE_TYPE_NVME ||
+                        IsPhisonFamily(pInfo));
+        }
+        if (bSsdLike) {
+            out->eEnc = RAW_ENC_UNKNOWN;
+            out->eCrit = ATTR_CRIT_NONE;
+            /* Keep the name. Profile (Phison) may restore KNOWN below. */
+            if (!ovl && out->nSemanticConfidence > 30)
+                out->nSemanticConfidence = 30;
+        }
+    }
+
+    if (IsPhisonFamily(pInfo))
+        ApplyPhisonSsdDecode(bID, out);
+
+    /* SSD C0 is emergency/unsafe power-off count, not HDD head-park. */
+    if (bID == 0xC0 && DriveTreatsC0AsPowerLoss(pInfo)) {
+        out->szName = "Аварийные отключения питания";
+        out->eEnc = RAW_ENC_COUNTER32;
+        out->eCrit = ATTR_CRIT_NONE;
+        if (out->nSemanticConfidence < 80)
+            out->nSemanticConfidence = 80;
+    }
+
+    out->eState = (out->eEnc == RAW_ENC_UNKNOWN)
+                  ? ATTR_DECODE_UNKNOWN
+                  : ATTR_DECODE_KNOWN;
+}
+
+const char* GetAttrNameEx(BYTE bID, const DRIVE_INFO* pInfo)
+{
+    ATTR_DECODE d;
+    GetAttrDecode(bID, pInfo, &d);
+    return d.szName ? d.szName : VendorSpecificAttrName(bID);
 }
 
 ATTR_CRITICALITY GetAttrCriticality(BYTE bID)
@@ -889,8 +1249,8 @@ const char* GetHealthStatusName(DRIVE_HEALTH_STATUS eStatus)
     case HEALTH_STATUS_GOOD:     return "Хорошо";
     case HEALTH_STATUS_CAUTION:  return "Внимание";
     case HEALTH_STATUS_BAD:      return "Плохо";
-    case HEALTH_STATUS_WARNING:  return "Внимание";
-    default:                     return "Неизвестно";
+    case HEALTH_STATUS_WARNING:  return "Плохо"; /* predictive failure displays as BAD */
+    default:                     return "Нет данных";
     }
 }
 
@@ -922,6 +1282,43 @@ const char* GetVendorName(DRIVE_VENDOR eVendor)
     }
 }
 
+const char* GetControllerName(DRIVE_CONTROLLER eController)
+{
+    switch (eController) {
+    case CONTROLLER_PHISON:   return "Phison";
+    case CONTROLLER_SMI:      return "Silicon Motion";
+    case CONTROLLER_SAMSUNG:  return "Samsung";
+    case CONTROLLER_MARVELL:  return "Marvell";
+    case CONTROLLER_INTEL:    return "Intel";
+    case CONTROLLER_MICRON:   return "Micron";
+    case CONTROLLER_HYNIX:    return "SK Hynix";
+    case CONTROLLER_KIOXIA:   return "Kioxia";
+    case CONTROLLER_SANDISK:  return "SanDisk";
+    case CONTROLLER_REALTEK:  return "Realtek";
+    case CONTROLLER_SEAGATE:  return "Seagate";
+    case CONTROLLER_WD:       return "Western Digital";
+    case CONTROLLER_TOSHIBA:  return "Toshiba";
+    case CONTROLLER_HITACHI:  return "HGST";
+    case CONTROLLER_AMAZON:   return "Amazon";
+    case CONTROLLER_MAXIO:    return "Maxio";
+    case CONTROLLER_INNOGRIT: return "Innogrit";
+    default:                  return "—";
+    }
+}
+
+const char* GetNandName(NAND_VENDOR eNand)
+{
+    switch (eNand) {
+    case NAND_SAMSUNG: return "Samsung";
+    case NAND_MICRON:  return "Micron";
+    case NAND_KIOXIA:  return "Kioxia";
+    case NAND_HYNIX:   return "SK Hynix";
+    case NAND_INTEL:   return "Intel";
+    case NAND_SANDISK: return "SanDisk";
+    default:           return "—";
+    }
+}
+
 /* ============================================================
  * Drive vendor detection from model name
  * Identifies vendors for attribute interpretation
@@ -937,7 +1334,10 @@ DRIVE_VENDOR DetectDriveVendor(const char* szModel)
         szUpper[i] = (char)toupper((unsigned char)szModel[i]);
     szUpper[i] = '\0';
 
+    /* MZ-76E500, MZNLN128, MZVLB256 — OEM codes start with MZ + letter. */
     if (strstr(szUpper, "SAMSUNG") || strstr(szUpper, "MZ-") ||
+        (szUpper[0] == 'M' && szUpper[1] == 'Z' &&
+         szUpper[2] >= 'A' && szUpper[2] <= 'Z') ||
         strstr(szUpper, "PM9") || strstr(szUpper, "SM9") ||
         (strstr(szUpper, "SSD ") && strstr(szUpper, "EVO")) ||
         (strstr(szUpper, "SSD ") && strstr(szUpper, "PRO")))
@@ -1042,6 +1442,217 @@ DRIVE_VENDOR DetectDriveVendor(const char* szModel)
         return VENDOR_OTHER;
 
     return VENDOR_UNKNOWN;
+}
+
+static void ToUpperCopy(char* dst, int nDst, const char* src)
+{
+    int i;
+    if (!dst || nDst <= 0) return;
+    dst[0] = '\0';
+    if (!src) return;
+    for (i = 0; i < nDst - 1 && src[i]; i++)
+        dst[i] = (char)toupper((unsigned char)src[i]);
+    dst[i] = '\0';
+}
+
+static BOOL HasSmartAttr(const DRIVE_INFO* p, BYTE id)
+{
+    int i;
+    if (!p || id == 0) return FALSE;
+    for (i = 0; i < 30; i++) {
+        if (p->attrData.stAttributes[i].bAttrID == id)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static int CountSmartAttrRange(const DRIVE_INFO* p, BYTE lo, BYTE hi)
+{
+    int n = 0;
+    unsigned id;
+    for (id = (unsigned)lo; id <= (unsigned)hi; id++) {
+        if (HasSmartAttr(p, (BYTE)id)) n++;
+    }
+    return n;
+}
+
+/* NVMe Identify Controller bytes 0-1 are PCI VID (spec). Named fields of
+ * NVME_IDENTIFY_CONTROLLER skip this; read the raw copy. Do not invent a VID. */
+static USHORT NvmeIdentVid(const DRIVE_INFO* p)
+{
+    const BYTE* id;
+    if (!p || !p->bGotNVMeIdent) return 0;
+    id = (const BYTE*)&p->nvmeIdent;
+    return (USHORT)id[0] | ((USHORT)id[1] << 8);
+}
+
+static DRIVE_CONTROLLER ControllerFromNvmeVid(USHORT vid)
+{
+    switch (vid) {
+    case 0x144D: return CONTROLLER_SAMSUNG;
+    case 0x1987:
+    case 0x1D97:
+    case 0x1C2C: return CONTROLLER_PHISON;
+    case 0x126F: return CONTROLLER_SMI;
+    case 0x1B4B: return CONTROLLER_MARVELL;   /* PCI SIG: Marvell */
+    case 0x1C5C: return CONTROLLER_HYNIX;
+    case 0x8086: return CONTROLLER_INTEL;
+    case 0x025E: return CONTROLLER_INTEL;    /* Solidigm (ex-Intel NAND) */
+    case 0x1E0F:
+    case 0x1179: return CONTROLLER_KIOXIA;   /* 1179 = Toshiba/Kioxia PCI */
+    case 0x15B7: return CONTROLLER_SANDISK;
+    case 0x1B96: return CONTROLLER_WD;
+    case 0x10EC: return CONTROLLER_REALTEK;
+    case 0x1BB1: return CONTROLLER_SEAGATE;
+    case 0x1D0F: return CONTROLLER_AMAZON;
+    case 0x1344:
+    case 0xC0A9: return CONTROLLER_MICRON;
+    case 0x1E4B: return CONTROLLER_MAXIO;
+    case 0x1DDC: return CONTROLLER_INNOGRIT;
+    default:     return CONTROLLER_UNKNOWN;
+    }
+}
+
+static DRIVE_CONTROLLER DetectDriveController(const DRIVE_INFO* p)
+{
+    USHORT vid;
+    char szModelU[48], szFwU[16];
+    int nPhison;
+    BOOL hdd, ssd;
+
+    if (!p) return CONTROLLER_UNKNOWN;
+
+    hdd = (p->eType == DRIVE_TYPE_HDD);
+    ssd = (p->eType == DRIVE_TYPE_SSD_SATA ||
+           p->eType == DRIVE_TYPE_M2_SATA ||
+           p->eType == DRIVE_TYPE_NVME ||
+           p->bIsNVMe);
+
+    ToUpperCopy(szFwU, sizeof(szFwU), p->szFirmware);
+    ToUpperCopy(szModelU, sizeof(szModelU), p->szModel);
+
+    /* 1. NVMe PCI/identify VID — highest confidence. */
+    if (p->bIsNVMe || p->bGotNVMeIdent) {
+        vid = NvmeIdentVid(p);
+        if (vid) {
+            DRIVE_CONTROLLER c = ControllerFromNvmeVid(vid);
+            if (c != CONTROLLER_UNKNOWN)
+                return c;
+        }
+    }
+
+    /* 2. Firmware / model strings (work even before SMART). */
+    if (strncmp(szFwU, "HPS", 3) == 0 ||
+        strncmp(szFwU, "SBFK", 4) == 0 ||
+        strncmp(szFwU, "SBFM", 4) == 0 ||
+        strncmp(szFwU, "SAFM", 4) == 0 ||
+        strncmp(szFwU, "SBFB", 4) == 0 ||
+        strncmp(szFwU, "ECFM", 4) == 0 ||
+        strncmp(szFwU, "E8FM", 4) == 0 ||
+        strncmp(szFwU, "E7FM", 4) == 0)
+        return CONTROLLER_PHISON;
+
+    if (strstr(szModelU, "SM226") || strstr(szModelU, "SM225") ||
+        strstr(szModelU, "SM232") || strstr(szModelU, "SM250") ||
+        strstr(szFwU, "SM226") || strstr(szFwU, "SM225") ||
+        strstr(szFwU, "SM232"))
+        return CONTROLLER_SMI;
+
+    if (strstr(szModelU, "MAP120") || strstr(szModelU, "MAP160") ||
+        strstr(szModelU, "MAP100") || strstr(szFwU, "MAP16") ||
+        strstr(szFwU, "MAP12"))
+        return CONTROLLER_MAXIO;
+
+    if (strstr(szModelU, "RTS576") || strstr(szModelU, "RTS577") ||
+        strstr(szFwU, "RTS576") || strstr(szFwU, "RTL57"))
+        return CONTROLLER_REALTEK;
+
+    if (strstr(szModelU, "IG521") || strstr(szModelU, "IG523") ||
+        strstr(szModelU, "INNOGRIT"))
+        return CONTROLLER_INNOGRIT;
+
+    /* 3. SATA SMART fingerprint. 0xCA is not Micron-only (Samsung has it). */
+    nPhison = CountSmartAttrRange(p, 0xA0, 0xA9);
+    if (HasSmartAttr(p, 0xA9) || nPhison >= 3)
+        return CONTROLLER_PHISON;
+    if (HasSmartAttr(p, 0xE7) && HasSmartAttr(p, 0xE9))
+        return CONTROLLER_PHISON;
+
+    if (p->eVendor == VENDOR_SAMSUNG && !hdd)
+        return CONTROLLER_SAMSUNG;
+
+    if (HasSmartAttr(p, 0xE1) &&
+        (p->eVendor == VENDOR_INTEL || p->eVendor == VENDOR_UNKNOWN))
+        return CONTROLLER_INTEL;
+
+    if (HasSmartAttr(p, 0xCA) && p->eVendor == VENDOR_MICRON)
+        return CONTROLLER_MICRON;
+
+    /* Kingston A400 and similar: consumer SATA is Phison. */
+    if (!hdd && p->eVendor == VENDOR_KINGSTON &&
+        (HasSmartAttr(p, 0xE7) || HasSmartAttr(p, 0xE9) ||
+         HasSmartAttr(p, 0xA9) || p->eType == DRIVE_TYPE_SSD_SATA ||
+         p->eType == DRIVE_TYPE_M2_SATA))
+        return CONTROLLER_PHISON;
+
+    /* 4. HDD MCU follows brand. In-house SSD silicon too. */
+    if (hdd) {
+        switch (p->eVendor) {
+        case VENDOR_SEAGATE: return CONTROLLER_SEAGATE;
+        case VENDOR_WDC:     return CONTROLLER_WD;
+        case VENDOR_TOSHIBA: return CONTROLLER_TOSHIBA;
+        case VENDOR_HITACHI: return CONTROLLER_HITACHI;
+        case VENDOR_SAMSUNG: return CONTROLLER_SAMSUNG;
+        default: break;
+        }
+    } else if (ssd || !hdd) {
+        /* Rebrands (Kingston/ADATA/PNY/…) stay UNKNOWN unless fingerprinted. */
+        switch (p->eVendor) {
+        case VENDOR_SAMSUNG: return CONTROLLER_SAMSUNG;
+        case VENDOR_INTEL:   return CONTROLLER_INTEL;
+        case VENDOR_MICRON:  return CONTROLLER_MICRON;
+        case VENDOR_SKHYNIX: return CONTROLLER_HYNIX;
+        case VENDOR_SANDISK: return CONTROLLER_SANDISK;
+        case VENDOR_KIOXIA:  return CONTROLLER_KIOXIA;
+        default: break;
+        }
+    }
+
+    return CONTROLLER_UNKNOWN;
+}
+
+static NAND_VENDOR DetectNandVendor(const DRIVE_INFO* p)
+{
+    char szU[48];
+    if (!p) return NAND_UNKNOWN;
+    if (p->eType == DRIVE_TYPE_HDD)
+        return NAND_UNKNOWN;
+
+    ToUpperCopy(szU, sizeof(szU), p->szModel);
+
+    /* Conservative: only well-known Samsung consumer NAND. */
+    if (p->eVendor == VENDOR_SAMSUNG) {
+        if (strstr(szU, "MZ-") ||
+            (szU[0] == 'M' && szU[1] == 'Z' && szU[2] >= 'A' && szU[2] <= 'Z') ||
+            strstr(szU, "870") || strstr(szU, "860") ||
+            strstr(szU, "850") ||
+            strstr(szU, "980") || strstr(szU, "990") ||
+            ((strstr(szU, "EVO") || strstr(szU, "PRO")) &&
+             (strstr(szU, "SSD") || strstr(szU, "NVME"))))
+            return NAND_SAMSUNG;
+    }
+
+    /* Intel 6xxp is often Intel/Micron mix — leave UNKNOWN.
+     * Never assume Kingston NAND=Kingston or ADATA NAND=ADATA. */
+    return NAND_UNKNOWN;
+}
+
+void IdentifyDriveParts(DRIVE_INFO* pInfo)
+{
+    if (!pInfo) return;
+    pInfo->eVendor     = DetectDriveVendor(pInfo->szModel);
+    pInfo->eController = DetectDriveController(pInfo);
+    pInfo->eNand       = DetectNandVendor(pInfo);
 }
 
 /* ============================================================
@@ -2778,8 +3389,7 @@ static BOOL GetNVMeInfo(HANDLE hDrive, DRIVE_INFO* pInfo)
     pInfo->eType   = DRIVE_TYPE_NVME;
     pInfo->bIsNVMe = TRUE;
 
-    /* Detect vendor from model name */
-    pInfo->eVendor = DetectDriveVendor(pInfo->szModel);
+    IdentifyDriveParts(pInfo);
 
     return (pInfo->szModel[0] != '\0' || pInfo->bSMART_Supported);
 }
@@ -2863,18 +3473,19 @@ DRIVE_TYPE DetectDriveType(HANDLE hDrive, DRIVE_INFO* pInfo)
 }
 
 /* ============================================================
- * Health Calculation
+ * Health: state + confidence + evidence
  *
- * Uses a three-tier approach:
- * 1. SSD Life Left: uses vendor-specific remaining life %
- * 2. Threshold comparison: worst value <= threshold → BAD
- * 3. Raw value check: critical attrs with raw > 0 → CAUTION
+ * Overall eHealthStatus is worst-of evidence (GOOD/CAUTION/BAD/UNKNOWN).
+ * nHealthPercent is SECONDARY estimated remaining life only (endurance),
+ * never a fake % from worst/thresh or raw*N penalties.
+ * nConfidence is completeness of evidence, not "how healthy".
  * ============================================================ */
 
 /* Find threshold value for a given attribute ID */
-static BYTE FindThreshold(DRIVE_INFO* pInfo, BYTE bAttrID)
+static BYTE FindThreshold(const DRIVE_INFO* pInfo, BYTE bAttrID)
 {
     int j;
+    if (!pInfo) return 0;
     for (j = 0; j < 30; j++) {
         if (pInfo->threshData.stThresholds[j].bAttrID == bAttrID)
             return pInfo->threshData.stThresholds[j].bThresholdValue;
@@ -2882,273 +3493,1033 @@ static BYTE FindThreshold(DRIVE_INFO* pInfo, BYTE bAttrID)
     return 0;
 }
 
-int CalculateHealthNVMe(DRIVE_INFO* pInfo)
+/* RAW of attribute `id`, or -1 if the attribute is absent. */
+static int AttrRawOrNeg1(const DRIVE_INFO* pInfo, BYTE id)
 {
-    if (!pInfo->bIsNVMe || !pInfo->bSMART_Supported)
-        return -1;
-
-    NVME_HEALTH_INFO_LOG* pLog = &pInfo->nvmeHealth;
-
-    if (pLog->CriticalWarning & NVME_CRIT_WARN_READ_ONLY)
-        return 0;
-    int nPercentUsed = (int)pLog->PercentageUsed;
-    int nHealth = 100 - nPercentUsed;
-    if (nHealth < 0) nHealth = 0;
-    int nSpare  = (int)pLog->AvailableSpare;
-    int nThresh = (int)pLog->AvailableSpareThreshold;
-    if (nSpare < nThresh) {
-        int nDeficit = nThresh - nSpare;
-        int nPenalty = nDeficit * 2;
-        if (nPenalty > 30) nPenalty = 30;
-        nHealth -= nPenalty;
+    int i;
+    if (!pInfo) return -1;
+    for (i = 0; i < 30; i++) {
+        if (pInfo->attrData.stAttributes[i].bAttrID == id) {
+            unsigned __int64 v = GetRawValue48(pInfo->attrData.stAttributes[i].bRawValue);
+            if (v > (unsigned __int64)INT_MAX) return INT_MAX;
+            return (int)v;
+        }
     }
-
-    if (pLog->CriticalWarning & NVME_CRIT_WARN_RELIABILITY_DEGRADED)
-        nHealth -= 25;
-
-    if (pLog->CriticalWarning & NVME_CRIT_WARN_SPARE_BELOW_THRESH)
-        nHealth -= 10;
-
-    if (pLog->CriticalWarning & NVME_CRIT_WARN_TEMP_THRESHOLD)
-        nHealth -= 5;
-
-    if (nHealth < 0)   nHealth = 0;
-    if (nHealth > 100) nHealth = 100;
-
-    return nHealth;
+    return -1;
 }
 
-typedef struct _CRIT_ATTR {
-    BYTE  bID;
-    int   nWeight;
-    BOOL  bUseRaw;
-} CRIT_ATTR;
-
-static const CRIT_ATTR g_CritAttrs[] = {
-    { 0x05,  10,     TRUE  },
-    { 0xC6,  10,     TRUE  },
-    { 0xC5,   9,     TRUE  },
-    { 0xBB,   8,     TRUE  },
-    { 0xC4,   7,     TRUE  },
-    { 0xBC,   6,     TRUE  },
-    { 0x01,   5,     FALSE },
-    { 0x0A,   7,     FALSE },
-    { 0xB7,   5,     FALSE },
-    { 0xB8,   6,     FALSE },
-    { 0xC7,   4,     FALSE },
-    { 0xC8,   4,     FALSE },
-    { 0xCA,   5,     FALSE },
-    { 0xAB,   6,     FALSE },
-    { 0xAC,   6,     FALSE },
-    { 0x00,   0,     FALSE }
-};
-
-static int GetCritWeight(BYTE bID)
+static BOOL HasNonZeroThreshold(const DRIVE_INFO* pInfo)
 {
-    int i = 0;
-    while (g_CritAttrs[i].bID != 0x00) {
-        if (g_CritAttrs[i].bID == bID) return g_CritAttrs[i].nWeight;
-        i++;
+    int j;
+    if (!pInfo) return FALSE;
+    for (j = 0; j < 30; j++) {
+        if (pInfo->threshData.stThresholds[j].bAttrID != 0 &&
+            pInfo->threshData.stThresholds[j].bThresholdValue > 0)
+            return TRUE;
     }
-    return 0;
+    return FALSE;
+}
+
+static int Clamp100(int v)
+{
+    if (v < 0) return 0;
+    if (v > 100) return 100;
+    return v;
+}
+
+static BOOL FirmwareFamilyRecognized(const DRIVE_INFO* p)
+{
+    char szFwU[16];
+    if (!p || !p->szFirmware[0]) return FALSE;
+    ToUpperCopy(szFwU, sizeof(szFwU), p->szFirmware);
+    if (strncmp(szFwU, "HPS", 3) == 0) return TRUE;
+    if (strncmp(szFwU, "SBF", 3) == 0) return TRUE;
+    if (strncmp(szFwU, "SAFM", 4) == 0) return TRUE;
+    if (strncmp(szFwU, "ECFM", 4) == 0) return TRUE;
+    if (strncmp(szFwU, "E8FM", 4) == 0) return TRUE;
+    if (strncmp(szFwU, "E7FM", 4) == 0) return TRUE;
+    if (strstr(szFwU, "SM22") || strstr(szFwU, "SM23") || strstr(szFwU, "SM25"))
+        return TRUE;
+    return FALSE;
+}
+
+static int CountUnknownAttrs(const DRIVE_INFO* pInfo)
+{
+    int i, n = 0;
+    ATTR_DECODE dec;
+    if (!pInfo) return 0;
+    for (i = 0; i < 30; i++) {
+        BYTE id = pInfo->attrData.stAttributes[i].bAttrID;
+        if (id == 0) continue;
+        GetAttrDecode(id, pInfo, &dec);
+        if (dec.eState == ATTR_DECODE_UNKNOWN)
+            n++;
+    }
+    return n;
+}
+
+static int CountPresentAttrs(const DRIVE_INFO* pInfo)
+{
+    int i, n = 0;
+    if (!pInfo) return 0;
+    for (i = 0; i < 30; i++) {
+        if (pInfo->attrData.stAttributes[i].bAttrID != 0)
+            n++;
+    }
+    return n;
+}
+
+static BOOL MediaCountersClean(const DRIVE_INFO* p)
+{
+    if (!p) return FALSE;
+    if (p->nReallocated > 0) return FALSE;
+    if (p->nPendingSectors > 0) return FALSE;
+    if (p->nUncorrectable > 0) return FALSE;
+    if (p->nCrcErrors > 0) return FALSE;
+    if (p->qwNVMeMediaErrors > 0) return FALSE;
+    return TRUE;
+}
+
+static BOOL HasKnownMediaZeros(const DRIVE_INFO* p)
+{
+    int nPresent = 0;
+    if (!p) return FALSE;
+    if (p->nReallocated >= 0) {
+        nPresent++;
+        if (p->nReallocated != 0) return FALSE;
+    }
+    if (p->nPendingSectors >= 0) {
+        nPresent++;
+        if (p->nPendingSectors != 0) return FALSE;
+    }
+    if (p->nUncorrectable >= 0) {
+        nPresent++;
+        if (p->nUncorrectable != 0) return FALSE;
+    }
+    return nPresent > 0;
+}
+
+static TEMP_BAND TempBandFromC(int nC)
+{
+    if (nC <= 0) return TEMP_BAND_UNKNOWN;
+    if (nC <= 49) return TEMP_BAND_NORMAL;
+    if (nC <= 59) return TEMP_BAND_ELEVATED;
+    if (nC <= 69) return TEMP_BAND_HIGH;
+    return TEMP_BAND_CRITICAL;
+}
+
+static DRIVE_HEALTH_STATUS TempStatusFromBand(TEMP_BAND eBand)
+{
+    switch (eBand) {
+    case TEMP_BAND_NORMAL:   return HEALTH_STATUS_GOOD;
+    case TEMP_BAND_ELEVATED: return HEALTH_STATUS_CAUTION;
+    case TEMP_BAND_HIGH:     return HEALTH_STATUS_CAUTION;
+    case TEMP_BAND_CRITICAL: return HEALTH_STATUS_BAD;
+    default:                 return HEALTH_STATUS_UNKNOWN;
+    }
+}
+
+static void FormatUintGrouped(unsigned long n, char* buf, int nBuf)
+{
+    char tmp[32];
+    int len, i, o, first;
+    if (!buf || nBuf <= 0) return;
+    (void)_snprintf(tmp, sizeof(tmp), "%lu", n);
+    tmp[sizeof(tmp) - 1] = '\0';
+    len = (int)strlen(tmp);
+    first = len % 3;
+    if (first == 0) first = 3;
+    o = 0;
+    for (i = 0; i < len && o < nBuf - 1; i++) {
+        if (i > 0 && i >= first && ((i - first) % 3) == 0) {
+            buf[o++] = ' ';
+            if (o >= nBuf - 1) break;
+        }
+        buf[o++] = tmp[i];
+    }
+    buf[o] = '\0';
+}
+
+void FormatPowerOnHours(DWORD dwHours, char* szBuf, int nBufLen)
+{
+    char szN[32];
+    if (!szBuf || nBufLen <= 0) return;
+    if (dwHours == 0) {
+        safe_snprintf_n(szBuf, nBufLen, "нет данных");
+        return;
+    }
+    FormatUintGrouped((unsigned long)dwHours, szN, (int)sizeof(szN));
+    safe_snprintf_n(szBuf, nBufLen, "%s ч ≈ %.2f года",
+                    szN, (double)dwHours / 8760.0);
+}
+
+const char* GetTempBandName(TEMP_BAND eBand, BOOL bLowercase)
+{
+    switch (eBand) {
+    case TEMP_BAND_NORMAL:   return bLowercase ? "норма" : "Норма";
+    case TEMP_BAND_ELEVATED: return bLowercase ? "повышена" : "Повышена";
+    case TEMP_BAND_HIGH:     return bLowercase ? "высокая" : "Высокая";
+    case TEMP_BAND_CRITICAL: return bLowercase ? "критическая" : "Критическая";
+    default:                 return "нет данных";
+    }
+}
+
+static const char* QualityNameRu(NORM_QUALITY q, BOOL bRaw)
+{
+    switch (q) {
+    case NORM_QUALITY_LOW:    return "НИЗКОЕ";
+    case NORM_QUALITY_MEDIUM: return bRaw ? "СМЕШАННОЕ" : "СРЕДНЕЕ";
+    case NORM_QUALITY_HIGH:   return "ВЫСОКОЕ";
+    default:                  return "нет данных";
+    }
+}
+
+static int Utf8DispWidth(const char* s)
+{
+    int w = 0;
+    const unsigned char* p = (const unsigned char*)s;
+    if (!p) return 0;
+    while (*p) {
+        if (*p < 0x80) { p++; w++; }
+        else if ((*p & 0xE0) == 0xC0) { p += 2; w++; }
+        else if ((*p & 0xF0) == 0xE0) { p += 3; w++; }
+        else if ((*p & 0xF8) == 0xF0) { p += 4; w++; }
+        else p++;
+    }
+    return w;
+}
+
+static void PadUtf8(char* dst, int nDst, const char* s, int width)
+{
+    int w;
+    size_t used;
+    if (!dst || nDst <= 0) return;
+    dst[0] = '\0';
+    if (s)
+        safe_snprintf_n(dst, nDst, "%s", s);
+    w = Utf8DispWidth(dst);
+    used = strlen(dst);
+    while (w < width && used + 1 < (size_t)nDst) {
+        dst[used++] = ' ';
+        dst[used] = '\0';
+        w++;
+    }
+}
+
+static void FmtIntOrNA(char* buf, int nBuf, int v)
+{
+    if (v < 0)
+        safe_snprintf_n(buf, nBuf, "нет данных");
+    else
+        safe_snprintf_n(buf, nBuf, "%d", v);
+}
+
+static void LectureAdd(char* buf, int nBuf, const char* s)
+{
+    size_t used, rem;
+    if (!buf || nBuf <= 1 || !s) return;
+    used = strlen(buf);
+    if (used >= (size_t)nBuf - 1) return;
+    rem = (size_t)nBuf - used;
+    safe_snprintf_n(buf + used, (int)rem, "%s", s);
+}
+
+static void FormatNvmeCritWarnBits(BYTE cw, char* buf, int nBuf)
+{
+    char tmp[192];
+    tmp[0] = '\0';
+    if (!buf || nBuf <= 0) return;
+    if (cw == 0) {
+        safe_snprintf_n(buf, nBuf, "нет");
+        return;
+    }
+    if (cw & NVME_CRIT_WARN_SPARE_BELOW_THRESH)
+        LectureAdd(tmp, (int)sizeof(tmp), tmp[0] ? ", запас" : "запас");
+    if (cw & NVME_CRIT_WARN_TEMP_THRESHOLD)
+        LectureAdd(tmp, (int)sizeof(tmp), tmp[0] ? ", температура" : "температура");
+    if (cw & NVME_CRIT_WARN_RELIABILITY_DEGRADED)
+        LectureAdd(tmp, (int)sizeof(tmp), tmp[0] ? ", надёжность" : "надёжность");
+    if (cw & NVME_CRIT_WARN_READ_ONLY)
+        LectureAdd(tmp, (int)sizeof(tmp), tmp[0] ? ", только чтение" : "только чтение");
+    if (cw & NVME_CRIT_WARN_VOLATILE_MEM_BACKUP)
+        LectureAdd(tmp, (int)sizeof(tmp), tmp[0] ? ", резерв энергозависимой памяти" : "резерв энергозависимой памяти");
+    if (cw & NVME_CRIT_WARN_PMR_RO)
+        LectureAdd(tmp, (int)sizeof(tmp), tmp[0] ? ", постоянная память только чтение" : "постоянная память только чтение");
+    if (tmp[0] == '\0')
+        safe_snprintf_n(buf, nBuf, "есть");
+    else
+        safe_snprintf_n(buf, nBuf, "%s", tmp);
+}
+
+void AssessDriveHealth(DRIVE_INFO* pInfo)
+{
+    BYTE cw;
+    BOOL bSpareLow;
+    BOOL bHasMediaCounters;
+    int nUnknown;
+    int nAttr;
+    int nNormSame;
+    int nConfC, nConfT, nConfM, nConfD, nConfH;
+
+    if (!pInfo) return;
+
+    pInfo->nConfidence         = 0;
+    pInfo->nConfCompleteness   = 0;
+    pInfo->nConfTransport      = 0;
+    pInfo->nConfModelId        = 0;
+    pInfo->nConfVendorDecoder  = 0;
+    pInfo->nConfHealthAssess   = 0;
+    pInfo->nEndurancePercent   = -1;
+    pInfo->eReliability        = HEALTH_STATUS_UNKNOWN;
+    pInfo->eInterface          = HEALTH_STATUS_UNKNOWN;
+    pInfo->eTempStatus         = HEALTH_STATUS_UNKNOWN;
+    pInfo->eTempBand           = TEMP_BAND_UNKNOWN;
+    pInfo->eNormQuality        = NORM_QUALITY_UNKNOWN;
+    pInfo->eRawQuality         = NORM_QUALITY_UNKNOWN;
+    pInfo->nReallocated        = -1;
+    pInfo->nPendingSectors     = -1;
+    pInfo->nUncorrectable      = -1;
+    pInfo->nRemapEvents        = -1;
+    pInfo->nCrcErrors          = -1;
+    pInfo->bThresholdViolation = FALSE;
+    pInfo->szEvidence[0]       = '\0';
+    pInfo->nHealthPercent      = -1;
+    pInfo->eHealthStatus       = HEALTH_STATUS_UNKNOWN;
+
+    if (!pInfo->bSMART_Supported) {
+        safe_snprintf(pInfo->szEvidence, "SMART недоступен");
+        return;
+    }
+
+    pInfo->nReallocated    = AttrRawOrNeg1(pInfo, 0x05);
+    pInfo->nPendingSectors = AttrRawOrNeg1(pInfo, 0xC5);
+    pInfo->nUncorrectable  = AttrRawOrNeg1(pInfo, 0xC6);
+    pInfo->nRemapEvents    = AttrRawOrNeg1(pInfo, 0xC4);
+    pInfo->nCrcErrors      = AttrRawOrNeg1(pInfo, 0xC7);
+
+    /* Threshold fail: current value OR worst <= thresh. Skip thresh==0
+     * (vendor "not used") and 0/255 garbage normalized values. */
+    {
+        int i;
+        for (i = 0; i < 30; i++) {
+            SMART_ATTRIBUTE* pAttr = &pInfo->attrData.stAttributes[i];
+            BYTE bThresh, bVal, bWorst;
+            BOOL bValOk, bWorstOk;
+            if (pAttr->bAttrID == 0) continue;
+            bThresh = FindThreshold(pInfo, pAttr->bAttrID);
+            if (bThresh == 0) continue;
+            bVal     = pAttr->bAttrValue;
+            bWorst   = pAttr->bWorstValue;
+            bValOk   = (bVal != 0 && bVal != 255);
+            bWorstOk = (bWorst != 0 && bWorst != 255);
+            if (bValOk && bVal <= bThresh)
+                pInfo->bThresholdViolation = TRUE;
+            if (bWorstOk && bWorst <= bThresh)
+                pInfo->bThresholdViolation = TRUE;
+        }
+    }
+
+    cw = pInfo->bIsNVMe ? pInfo->nvmeHealth.CriticalWarning : (BYTE)0;
+    bSpareLow = FALSE;
+    if (pInfo->bIsNVMe) {
+        int nSpare   = (int)pInfo->nvmeHealth.AvailableSpare;
+        int nSpareTh = (int)pInfo->nvmeHealth.AvailableSpareThreshold;
+        if (nSpare < nSpareTh)
+            bSpareLow = TRUE;
+        if (cw & NVME_CRIT_WARN_SPARE_BELOW_THRESH)
+            bSpareLow = TRUE;
+    }
+
+    /* Endurance: remaining life, or -1 if the drive has no such counter. */
+    if (pInfo->bIsNVMe) {
+        int nLeft = 100 - (int)pInfo->nvmeHealth.PercentageUsed;
+        if (nLeft < 0)   nLeft = 0;
+        if (nLeft > 100) nLeft = 100;
+        pInfo->nEndurancePercent = nLeft;
+    } else if (pInfo->nSSDLifeLeft >= 0 && pInfo->nSSDLifeLeft <= 100) {
+        pInfo->nEndurancePercent = pInfo->nSSDLifeLeft;
+    } else {
+        pInfo->nEndurancePercent = -1;
+    }
+
+    /* Secondary estimated health = endurance only. Never worst/thresh. */
+    if (pInfo->nEndurancePercent >= 0)
+        pInfo->nHealthPercent = pInfo->nEndurancePercent;
+    else
+        pInfo->nHealthPercent = -1;
+
+    /* Reliability axis — C0/C3/B0/POH/temp-below-60 are not media failures. */
+    if (pInfo->bPredictFailure || pInfo->bThresholdViolation ||
+        (cw & NVME_CRIT_WARN_RELIABILITY_DEGRADED) ||
+        (cw & NVME_CRIT_WARN_READ_ONLY)) {
+        pInfo->eReliability = HEALTH_STATUS_BAD;
+    } else if (pInfo->nReallocated > 0 || pInfo->nPendingSectors > 0 ||
+               pInfo->nUncorrectable > 0 || pInfo->qwNVMeMediaErrors > 0 ||
+               bSpareLow) {
+        pInfo->eReliability = HEALTH_STATUS_CAUTION;
+    } else {
+        pInfo->eReliability = HEALTH_STATUS_GOOD;
+    }
+
+    /* Interface axis: NVMe has no CRC analog — GOOD if SMART is present. */
+    if (pInfo->bIsNVMe)
+        pInfo->eInterface = HEALTH_STATUS_GOOD;
+    else if (pInfo->nCrcErrors > 0)
+        pInfo->eInterface = HEALTH_STATUS_CAUTION;
+    else
+        pInfo->eInterface = HEALTH_STATUS_GOOD;
+
+    /* Temperature band (SSD-focused). 48 C is NORMAL. Does not by itself
+     * flip overall health; HIGH (>=60) still CAUTION via existing rule. */
+    pInfo->eTempBand = TempBandFromC(pInfo->nTemperatureC);
+    if (cw & NVME_CRIT_WARN_TEMP_THRESHOLD)
+        pInfo->eTempBand = TEMP_BAND_CRITICAL;
+    pInfo->eTempStatus = TempStatusFromBand(pInfo->eTempBand);
+
+    /* Overall state: worst-of listed evidence. Predictive failure is BAD.
+     * Unknown vendor RAW, C0, C3, B0, POH, 48 C are NOT penalties. */
+    if (pInfo->bPredictFailure || pInfo->bThresholdViolation ||
+        (cw & NVME_CRIT_WARN_READ_ONLY) ||
+        (cw & NVME_CRIT_WARN_RELIABILITY_DEGRADED)) {
+        pInfo->eHealthStatus = HEALTH_STATUS_BAD;
+    } else if (pInfo->nReallocated > 0 ||
+               pInfo->nPendingSectors > 0 ||
+               pInfo->nUncorrectable > 0 ||
+               bSpareLow ||
+               (cw & NVME_CRIT_WARN_SPARE_BELOW_THRESH) ||
+               (cw & NVME_CRIT_WARN_TEMP_THRESHOLD) ||
+               pInfo->qwNVMeMediaErrors > 0 ||
+               pInfo->nCrcErrors > 0 ||
+               pInfo->nTemperatureC >= 60 ||
+               (pInfo->nEndurancePercent >= 0 && pInfo->nEndurancePercent <= 10) ||
+               (pInfo->bGotErrorLog && pInfo->nErrorLogCount > 0)) {
+        pInfo->eHealthStatus = HEALTH_STATUS_CAUTION;
+    } else {
+        pInfo->eHealthStatus = HEALTH_STATUS_GOOD;
+    }
+
+    nUnknown = CountUnknownAttrs(pInfo);
+    nAttr    = CountPresentAttrs(pInfo);
+
+    /* Normalized SMART usefulness: identical 100/100/50 is LOW, not "perfect". */
+    nNormSame = 0;
+    if (!pInfo->bIsNVMe && nAttr >= 8) {
+        int i;
+        int nMinV = 255, nMaxV = 0, nDistinctish = 0;
+        for (i = 0; i < 30; i++) {
+            const SMART_ATTRIBUTE* pA = &pInfo->attrData.stAttributes[i];
+            BYTE bThresh, bVal, bWorst;
+            BOOL bSame;
+            if (pA->bAttrID == 0) continue;
+            bVal   = pA->bAttrValue;
+            bWorst = pA->bWorstValue;
+            bThresh = FindThreshold(pInfo, pA->bAttrID);
+            bSame = FALSE;
+            if (bVal == 100 && bWorst == 100 && (bThresh == 50 || bThresh == 0))
+                bSame = TRUE;
+            else if (bVal == bWorst && (bThresh == 0 || bThresh == 50) &&
+                     (bVal == 100 || bVal == 200))
+                bSame = TRUE;
+            if (bSame) nNormSame++;
+            if (bVal < nMinV) nMinV = bVal;
+            if (bVal > nMaxV) nMaxV = bVal;
+        }
+        if (nNormSame * 100 >= nAttr * 70)
+            pInfo->eNormQuality = NORM_QUALITY_LOW;
+        else if ((nMaxV - nMinV) >= 10)
+            pInfo->eNormQuality = NORM_QUALITY_HIGH;
+        else
+            pInfo->eNormQuality = NORM_QUALITY_MEDIUM;
+        (void)nDistinctish;
+    }
+
+    /* RAW quality: known media counters vs vendor-unknown packing. */
+    if (pInfo->bIsNVMe) {
+        pInfo->eRawQuality = NORM_QUALITY_HIGH;
+    } else {
+        int nMedia = 0;
+        if (pInfo->nReallocated >= 0) nMedia++;
+        if (pInfo->nPendingSectors >= 0) nMedia++;
+        if (pInfo->nUncorrectable >= 0) nMedia++;
+        if (pInfo->nRemapEvents >= 0) nMedia++;
+        if (pInfo->nCrcErrors >= 0) nMedia++;
+        if (nMedia >= 3 && (nAttr == 0 || nUnknown * 2 < nAttr))
+            pInfo->eRawQuality = NORM_QUALITY_HIGH;
+        else if (nMedia == 0 || (nAttr > 0 && nUnknown * 100 >= nAttr * 70))
+            pInfo->eRawQuality = NORM_QUALITY_LOW;
+        else
+            pInfo->eRawQuality = NORM_QUALITY_MEDIUM;
+    }
+
+    /* Split confidence. Unknown encodings go ONLY into vendor-decoder. */
+    nConfC = 50;
+    if (pInfo->bIsNVMe || HasNonZeroThreshold(pInfo))
+        nConfC += 20;
+    bHasMediaCounters = pInfo->bIsNVMe ||
+        (pInfo->nReallocated >= 0) ||
+        (pInfo->nPendingSectors >= 0) ||
+        (pInfo->nUncorrectable >= 0);
+    if (bHasMediaCounters)
+        nConfC += 10;
+    if (pInfo->nTemperatureC > 0)
+        nConfC += 10;
+    if (pInfo->nEndurancePercent >= 0 || pInfo->bIsNVMe)
+        nConfC += 10;
+    nConfC = Clamp100(nConfC);
+
+    if (pInfo->bIsUSB) {
+        nConfT = pInfo->bSMART_Supported ? 90 : 40;
+    } else {
+        nConfT = 100;
+    }
+
+    if (pInfo->eController != CONTROLLER_UNKNOWN)
+        nConfM = 99;
+    else if (FirmwareFamilyRecognized(pInfo) || IsPhisonFamily(pInfo))
+        nConfM = 90;
+    else
+        nConfM = 70;
+
+    if (pInfo->bIsNVMe) {
+        nConfD = 100;
+    } else if (nUnknown == 0) {
+        nConfD = 100;
+    } else {
+        nConfD = 100 - 10 * nUnknown;
+        if (nConfD < 40) nConfD = 40;
+    }
+
+    nConfH = 55;
+    if (pInfo->eHealthStatus == HEALTH_STATUS_GOOD &&
+        MediaCountersClean(pInfo) &&
+        !pInfo->bPredictFailure &&
+        !pInfo->bThresholdViolation) {
+        nConfH = 95;
+    } else if (pInfo->eHealthStatus == HEALTH_STATUS_GOOD) {
+        nConfH = 85;
+    } else if (pInfo->eHealthStatus == HEALTH_STATUS_CAUTION) {
+        nConfH = 70;
+    } else {
+        nConfH = 55;
+    }
+    if (pInfo->eNormQuality == NORM_QUALITY_LOW)
+        nConfH -= 5;
+    if (nUnknown >= 3)
+        nConfH -= 5;
+    if (HasKnownMediaZeros(pInfo) && nConfH < 70)
+        nConfH = 70;
+    nConfH = Clamp100(nConfH);
+
+    pInfo->nConfCompleteness  = nConfC;
+    pInfo->nConfTransport     = nConfT;
+    pInfo->nConfModelId       = nConfM;
+    pInfo->nConfVendorDecoder = nConfD;
+    pInfo->nConfHealthAssess  = nConfH;
+    pInfo->nConfidence = (20 * nConfC + 10 * nConfT + 15 * nConfM +
+                          20 * nConfD + 35 * nConfH + 50) / 100;
+    pInfo->nConfidence = Clamp100(pInfo->nConfidence);
+
+    /* One-line Russian evidence. Full words; lecture has the matrix. */
+    if (pInfo->bIsNVMe) {
+        char szCW[128];
+        FormatNvmeCritWarnBits(cw, szCW, (int)sizeof(szCW));
+        safe_snprintf(pInfo->szEvidence,
+            "Критическое предупреждение: %s. Ошибки носителя: %llu.",
+            szCW,
+            (unsigned long long)pInfo->qwNVMeMediaErrors);
+    } else {
+        char szR[24], szPend[24], szU[24];
+        FmtIntOrNA(szR,    (int)sizeof(szR),    pInfo->nReallocated);
+        FmtIntOrNA(szPend, (int)sizeof(szPend), pInfo->nPendingSectors);
+        FmtIntOrNA(szU,    (int)sizeof(szU),    pInfo->nUncorrectable);
+        safe_snprintf(pInfo->szEvidence,
+            "Переназначенные сектора: %s  Ожидающие сектора: %s  Неисправимые сектора: %s  Нарушение порога: %s  Прогноз отказа: %s",
+            szR, szPend, szU,
+            pInfo->bThresholdViolation ? "да" : "нет",
+            pInfo->bPredictFailure     ? "да" : "нет");
+    }
+}
+
+static void LectureAddF(char* buf, int nBuf, const char* fmt, ...)
+{
+    char tmp[768];
+    va_list ap;
+    if (!buf || nBuf <= 1 || !fmt) return;
+    va_start(ap, fmt);
+    (void)_vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    tmp[sizeof(tmp) - 1] = '\0';
+    va_end(ap);
+    LectureAdd(buf, nBuf, tmp);
+}
+
+static void LectureAddSplitConfidence(char* buf, int nBuf, const DRIVE_INFO* p)
+{
+    char c1[40], c2[16];
+    LectureAdd(buf, nBuf, "Слои уверенности:\r\n");
+    PadUtf8(c1, (int)sizeof(c1), "Полнота данных", 26);
+    safe_snprintf(c2, "%d%%", p->nConfCompleteness);
+    LectureAddF(buf, nBuf, "  %s%s\r\n", c1, c2);
+    PadUtf8(c1, (int)sizeof(c1), "Транспорт", 26);
+    safe_snprintf(c2, "%d%%", p->nConfTransport);
+    LectureAddF(buf, nBuf, "  %s%s\r\n", c1, c2);
+    PadUtf8(c1, (int)sizeof(c1), "Идентификация модели", 26);
+    safe_snprintf(c2, "%d%%", p->nConfModelId);
+    LectureAddF(buf, nBuf, "  %s%s\r\n", c1, c2);
+    PadUtf8(c1, (int)sizeof(c1), "Вендорский декодер", 26);
+    safe_snprintf(c2, "%d%%", p->nConfVendorDecoder);
+    LectureAddF(buf, nBuf, "  %s%s\r\n", c1, c2);
+    PadUtf8(c1, (int)sizeof(c1), "Оценка здоровья", 26);
+    safe_snprintf(c2, "%d%%", p->nConfHealthAssess);
+    LectureAddF(buf, nBuf, "  %s%s\r\n\r\n", c1, c2);
+}
+
+static void LectureMatrixRow(char* buf, int nBuf,
+                             const char* evid, const char* val, const char* infl)
+{
+    char c1[72], c2[48], c3[40];
+    PadUtf8(c1, (int)sizeof(c1), evid, 28);
+    PadUtf8(c2, (int)sizeof(c2), val, 22);
+    PadUtf8(c3, (int)sizeof(c3), infl, 16);
+    LectureAddF(buf, nBuf, "  %s%s%s\r\n", c1, c2, c3);
+}
+
+static void LectureFmtInt(char* buf, int nBuf, int v)
+{
+    if (v < 0)
+        safe_snprintf_n(buf, nBuf, "нет данных");
+    else
+        safe_snprintf_n(buf, nBuf, "%d", v);
+}
+
+static void LectureAddUnknownIdList(char* buf, int nBuf, const DRIVE_INFO* pInfo)
+{
+    int ui, nUnk = 0;
+    char szIds[192];
+    szIds[0] = '\0';
+    for (ui = 0; ui < 30; ui++) {
+        ATTR_DECODE dec;
+        BYTE id = pInfo->attrData.stAttributes[ui].bAttrID;
+        char piece[16];
+        if (id == 0) continue;
+        GetAttrDecode(id, pInfo, &dec);
+        if (dec.eState != ATTR_DECODE_UNKNOWN) continue;
+        safe_snprintf(piece, "%s%02Xh", nUnk ? ", " : "", id);
+        {
+            size_t used = strlen(szIds);
+            size_t rem = sizeof(szIds) - used;
+            if (rem > 1)
+                safe_snprintf_n(szIds + used, (int)rem, "%s", piece);
+        }
+        nUnk++;
+    }
+    if (nUnk > 0) {
+        LectureAddF(buf, nBuf,
+            "Атрибуты %s не оцениваются: нет доверенного профиля RAW-кодировки "
+            "для этого контроллера/прошивки. Большое RAW-значение не доказывает сбои. "
+            "Unknown ≠ Bad.\r\n",
+            szIds);
+    }
+}
+
+void FormatHealthLecture(const DRIVE_INFO* pInfo, char* szBuf, int nBufLen)
+{
+    BYTE cw;
+    BOOL bSpareLow;
+    const char* szState;
+    char szPoh[64];
+    char szTempBand[32];
+    int nUnknown;
+    int nPos, nCritFail, nMediaDeg, nUnresolved;
+    int nC0, nC3, nB0, nB1, nF5;
+
+    if (!szBuf || nBufLen <= 0) return;
+    szBuf[0] = '\0';
+    if (nBufLen < 2) return;
+
+    if (!pInfo) {
+        safe_snprintf_n(szBuf, nBufLen, "Нет выбранного диска");
+        return;
+    }
+
+    szState = GetHealthStatusName(pInfo->eHealthStatus);
+    LectureAddF(szBuf, nBufLen, "Состояние: %s\r\n", szState);
+    LectureAddF(szBuf, nBufLen, "Уверенность: %d%%\r\n\r\n", pInfo->nConfidence);
+
+    if (!pInfo->bSMART_Supported) {
+        if (pInfo->bIsUSB && IsLikelyUsbFlashDrive(pInfo)) {
+            LectureAdd(szBuf, nBufLen,
+                "SMART недоступен. Это USB-флешка: контроллер флешки обычно не отдаёт "
+                "атрибуты SMART, поэтому состояние не оценивается. Числа здоровья не выдумываются.\r\n");
+        } else if (pInfo->bIsUSB) {
+            LectureAdd(szBuf, nBufLen,
+                "SMART недоступен. USB-мост или корпус не пропускает команды SMART. "
+                "Без исходных данных оценка не ставится — программа не подставляет фиктивные проценты.\r\n");
+        } else if (pInfo->bIsNVMe) {
+            LectureAddF(szBuf, nBufLen,
+                "Не удалось прочитать журнал здоровья NVMe (код ошибки Windows %lu). "
+                "Возможные причины: нет прав администратора, драйвер не поддерживает запрос, "
+                "или устройство занято. Без журнала здоровья проценты не выдумываются.\r\n",
+                (unsigned long)pInfo->dwErrNvmeProtocol);
+        } else {
+            LectureAdd(szBuf, nBufLen,
+                "SMART недоступен. Без исходных данных оценка не ставится — "
+                "программа не подставляет фиктивные проценты. Запустите программу "
+                "от имени администратора и нажмите «Обновить».\r\n");
+        }
+        return;
+    }
+
+    LectureAddSplitConfidence(szBuf, nBufLen, pInfo);
+
+    cw = pInfo->bIsNVMe ? pInfo->nvmeHealth.CriticalWarning : (BYTE)0;
+    bSpareLow = FALSE;
+    if (pInfo->bIsNVMe) {
+        int nSpare   = (int)pInfo->nvmeHealth.AvailableSpare;
+        int nSpareTh = (int)pInfo->nvmeHealth.AvailableSpareThreshold;
+        if (nSpare < nSpareTh)
+            bSpareLow = TRUE;
+        if (cw & NVME_CRIT_WARN_SPARE_BELOW_THRESH)
+            bSpareLow = TRUE;
+    }
+
+    FormatPowerOnHours(pInfo->dwPowerOnHours, szPoh, (int)sizeof(szPoh));
+    if (pInfo->nTemperatureC > 0)
+        safe_snprintf(szTempBand, "%d °C · %s",
+                      pInfo->nTemperatureC,
+                      GetTempBandName(pInfo->eTempBand, TRUE));
+    else
+        safe_snprintf(szTempBand, "нет данных");
+
+    nUnknown = CountUnknownAttrs(pInfo);
+    nC0 = AttrRawOrNeg1(pInfo, 0xC0);
+    nC3 = AttrRawOrNeg1(pInfo, 0xC3);
+    nB0 = AttrRawOrNeg1(pInfo, 0xB0);
+    nB1 = AttrRawOrNeg1(pInfo, 0xB1);
+    nF5 = AttrRawOrNeg1(pInfo, 0xF5);
+
+    nPos = 0;
+    nCritFail = 0;
+    nMediaDeg = 0;
+    nUnresolved = nUnknown;
+
+    if (!pInfo->bPredictFailure) nPos++;
+    if (pInfo->nReallocated == 0) nPos++;
+    if (pInfo->nPendingSectors == 0) nPos++;
+    if (pInfo->nUncorrectable == 0) nPos++;
+    if (pInfo->nRemapEvents == 0) nPos++;
+    if (pInfo->nCrcErrors == 0) nPos++;
+    if (pInfo->nEndurancePercent >= 0) nPos++;
+    if (pInfo->bIsNVMe && pInfo->qwNVMeMediaErrors == 0) nPos++;
+    if (pInfo->bIsNVMe && !bSpareLow) nPos++;
+
+    if (pInfo->bPredictFailure || pInfo->bThresholdViolation ||
+        (cw & NVME_CRIT_WARN_READ_ONLY) ||
+        (cw & NVME_CRIT_WARN_RELIABILITY_DEGRADED))
+        nCritFail++;
+    if (pInfo->nReallocated > 0 || pInfo->nPendingSectors > 0 ||
+        pInfo->nUncorrectable > 0 || pInfo->qwNVMeMediaErrors > 0)
+        nMediaDeg++;
+
+    if (!pInfo->bIsNVMe && pInfo->eNormQuality != NORM_QUALITY_UNKNOWN) {
+        LectureAddF(szBuf, nBufLen, "Качество нормализованных SMART: %s\r\n",
+                    QualityNameRu(pInfo->eNormQuality, FALSE));
+        LectureAddF(szBuf, nBufLen, "Качество vendor RAW: %s\r\n",
+                    QualityNameRu(pInfo->eRawQuality, TRUE));
+        if (pInfo->eNormQuality == NORM_QUALITY_LOW)
+            LectureAdd(szBuf, nBufLen,
+                "Одинаковые Value/Worst/Threshold (100/100/50) не означают, что всё идеально — "
+                "у этой прошивки нормализованные числа слабо различают состояние.\r\n");
+        LectureAdd(szBuf, nBufLen, "\r\n");
+    }
+
+    if (pInfo->bIsNVMe) {
+        char szCW[192];
+        char szSpare[32], szMedia[32], szLife[32];
+        int nSpare   = (int)pInfo->nvmeHealth.AvailableSpare;
+        int nSpareTh = (int)pInfo->nvmeHealth.AvailableSpareThreshold;
+        int nUsed    = (int)pInfo->nvmeHealth.PercentageUsed;
+
+        FormatNvmeCritWarnBits(cw, szCW, (int)sizeof(szCW));
+
+        LectureAdd(szBuf, nBufLen, "Основные признаки:\r\n");
+        if (cw == 0) {
+            LectureAdd(szBuf, nBufLen, "  ✓ Критическое предупреждение: нет\r\n");
+        } else {
+            LectureAddF(szBuf, nBufLen, "  ✗ Критическое предупреждение: %s\r\n", szCW);
+        }
+        if (!bSpareLow)
+            LectureAddF(szBuf, nBufLen, "  ✓ Доступный запас: %d%%\r\n", nSpare);
+        else
+            LectureAddF(szBuf, nBufLen, "  ✗ Доступный запас: %d%% (порог %d%%)\r\n",
+                        nSpare, nSpareTh);
+        if (pInfo->qwNVMeMediaErrors == 0)
+            LectureAdd(szBuf, nBufLen, "  ✓ Ошибки носителя: 0\r\n");
+        else
+            LectureAddF(szBuf, nBufLen, "  ✗ Ошибки носителя: %llu\r\n",
+                        (unsigned long long)pInfo->qwNVMeMediaErrors);
+        if (pInfo->nEndurancePercent >= 0)
+            LectureAddF(szBuf, nBufLen,
+                "  ✓ Заявленный остаток ресурса: %d%%   (износ NAND, не здоровье)\r\n",
+                pInfo->nEndurancePercent);
+
+        LectureAdd(szBuf, nBufLen, "\r\nКонтекст (не штраф):\r\n");
+        LectureAddF(szBuf, nBufLen, "  Температура: %s. ", szTempBand);
+        LectureAddF(szBuf, nBufLen,
+            "Время на высокой температуре: предупреждение %lu мин, критическая %lu мин.\r\n",
+            (unsigned long)pInfo->nvmeHealth.WarningCompTempTime,
+            (unsigned long)pInfo->nvmeHealth.CriticalCompTempTime);
+        LectureAddF(szBuf, nBufLen,
+            "  Наработка: %s. Power-on hours ≠ признак отказа.\r\n", szPoh);
+        LectureAddF(szBuf, nBufLen,
+            "  Циклы включения: %lu. Контекст, не штраф.\r\n",
+            (unsigned long)pInfo->dwPowerCycleCount);
+        LectureAddF(szBuf, nBufLen,
+            "  Небезопасные выключения: %llu. Контекст, не штраф.\r\n",
+            (unsigned long long)pInfo->qwNVMeUnsafeShutdowns);
+
+        LectureAdd(szBuf, nBufLen, "\r\nМатрица улик:\r\n");
+        LectureMatrixRow(szBuf, nBufLen, "Улика", "Значение", "Влияние");
+        LectureMatrixRow(szBuf, nBufLen, "SMART overall",
+                         pInfo->bPredictFailure ? "FAIL" : "PASS",
+                         pInfo->bPredictFailure ? "−" : "+");
+        safe_snprintf(szSpare, "%d%%", nSpare);
+        LectureMatrixRow(szBuf, nBufLen, "Доступный запас", szSpare,
+                         bSpareLow ? "−" : "+");
+        safe_snprintf(szMedia, "%llu", (unsigned long long)pInfo->qwNVMeMediaErrors);
+        LectureMatrixRow(szBuf, nBufLen, "Ошибки носителя", szMedia,
+                         pInfo->qwNVMeMediaErrors == 0 ? "+" : "−");
+        if (pInfo->nEndurancePercent >= 0) {
+            safe_snprintf(szLife, "%d%%", pInfo->nEndurancePercent);
+            LectureMatrixRow(szBuf, nBufLen, "Остаток ресурса", szLife, "+");
+        }
+        {
+            char szT[24];
+            if (pInfo->nTemperatureC > 0)
+                safe_snprintf(szT, "%d °C", pInfo->nTemperatureC);
+            else
+                safe_snprintf(szT, "нет данных");
+            LectureMatrixRow(szBuf, nBufLen, "Температура", szT, "0");
+        }
+        {
+            char szH[24];
+            if (pInfo->dwPowerOnHours > 0)
+                safe_snprintf(szH, "%lu ч", (unsigned long)pInfo->dwPowerOnHours);
+            else
+                safe_snprintf(szH, "нет данных");
+            LectureMatrixRow(szBuf, nBufLen, "Наработка", szH, "0");
+        }
+        LectureMatrixRow(szBuf, nBufLen, "Контроллер",
+                         GetControllerName(pInfo->eController),
+                         pInfo->eController == CONTROLLER_UNKNOWN ? "−уверенность" : "0");
+
+        LectureAdd(szBuf, nBufLen, "\r\nИтог:\r\n");
+        if (pInfo->eHealthStatus == HEALTH_STATUS_GOOD) {
+            LectureAdd(szBuf, nBufLen, "  GOOD because:\r\n");
+        } else if (pInfo->eHealthStatus == HEALTH_STATUS_CAUTION) {
+            LectureAdd(szBuf, nBufLen, "  CAUTION because:\r\n");
+        } else {
+            LectureAdd(szBuf, nBufLen, "  BAD because:\r\n");
+        }
+        LectureAddF(szBuf, nBufLen, "    %d сильных положительных признаков\r\n", nPos);
+        LectureAddF(szBuf, nBufLen, "    %d критических отказов\r\n", nCritFail);
+        LectureAddF(szBuf, nBufLen, "    %d признаков деградации носителя\r\n", nMediaDeg);
+        LectureAdd(szBuf, nBufLen,
+            "Использованный ресурс — износ NAND, его не смешивают с запасом и ошибками. "
+            "Мы не превращаем использованный ресурс, запас, критическое предупреждение, "
+            "ошибки носителя и температуру в один процент здоровья.\r\n");
+        return;
+    }
+
+    /* ATA / SATA SMART */
+    {
+        char szR[24], szPend[24], szU[24], szCrc[24], szRemap[24], szLife[24];
+        LectureFmtInt(szR,    (int)sizeof(szR),    pInfo->nReallocated);
+        LectureFmtInt(szPend, (int)sizeof(szPend), pInfo->nPendingSectors);
+        LectureFmtInt(szU,    (int)sizeof(szU),    pInfo->nUncorrectable);
+        LectureFmtInt(szCrc,  (int)sizeof(szCrc),  pInfo->nCrcErrors);
+        LectureFmtInt(szRemap,(int)sizeof(szRemap),pInfo->nRemapEvents);
+
+        LectureAdd(szBuf, nBufLen, "Основные признаки:\r\n");
+        if (pInfo->nReallocated == 0)
+            LectureAdd(szBuf, nBufLen, "  ✓ Переназначенные сектора: 0\r\n");
+        else if (pInfo->nReallocated > 0)
+            LectureAddF(szBuf, nBufLen, "  ✗ Переназначенные сектора: %d\r\n", pInfo->nReallocated);
+        if (pInfo->nPendingSectors == 0)
+            LectureAdd(szBuf, nBufLen, "  ✓ Ожидающие сектора: 0\r\n");
+        else if (pInfo->nPendingSectors > 0)
+            LectureAddF(szBuf, nBufLen, "  ✗ Ожидающие сектора: %d\r\n", pInfo->nPendingSectors);
+        if (pInfo->nUncorrectable == 0)
+            LectureAdd(szBuf, nBufLen, "  ✓ Неисправимые сектора: 0\r\n");
+        else if (pInfo->nUncorrectable > 0)
+            LectureAddF(szBuf, nBufLen, "  ✗ Неисправимые сектора: %d\r\n", pInfo->nUncorrectable);
+        if (pInfo->nRemapEvents == 0)
+            LectureAdd(szBuf, nBufLen, "  ✓ События переназначения: 0\r\n");
+        else if (pInfo->nRemapEvents > 0)
+            LectureAddF(szBuf, nBufLen, "  ✗ События переназначения: %d\r\n", pInfo->nRemapEvents);
+        if (pInfo->nCrcErrors == 0)
+            LectureAdd(szBuf, nBufLen, "  ✓ CRC-ошибки: 0\r\n");
+        else if (pInfo->nCrcErrors > 0)
+            LectureAddF(szBuf, nBufLen, "  ✗ CRC-ошибки: %d\r\n", pInfo->nCrcErrors);
+        if (pInfo->nEndurancePercent >= 0)
+            LectureAddF(szBuf, nBufLen,
+                "  ✓ Заявленный остаток ресурса: %d%%   (это износ NAND, не здоровье)\r\n",
+                pInfo->nEndurancePercent);
+
+        if (nUnknown > 0) {
+            LectureAdd(szBuf, nBufLen, "\r\nНаблюдение:\r\n");
+            LectureAdd(szBuf, nBufLen,
+                "  ⚠ Есть vendor-specific SMART-счётчики с нестандартными RAW, которые нельзя "
+                "надёжно трактовать без профиля контроллера/прошивки. Unknown ≠ Bad: B0 не штрафует "
+                "здоровье, пока декодер не доказал, что число — физические ошибки.\r\n");
+        }
+
+        LectureAdd(szBuf, nBufLen, "\r\nКонтекст (не штраф):\r\n");
+        LectureAddF(szBuf, nBufLen,
+            "  Температура: %s. Время на высокой температуре: нет данных.\r\n",
+            szTempBand);
+        LectureAddF(szBuf, nBufLen,
+            "  Наработка: %s. Power-on hours ≠ признак отказа.\r\n", szPoh);
+        LectureAddF(szBuf, nBufLen,
+            "  Циклы включения: %lu. Контекст, не штраф.\r\n",
+            (unsigned long)pInfo->dwPowerCycleCount);
+        if (nC0 >= 0 && DriveTreatsC0AsPowerLoss(pInfo)) {
+            LectureAddF(szBuf, nBufLen,
+                "  Аварийные отключения питания (C0): %d. Тяжесть: INFO. "
+                "Тренд: нет данных (нужна повторная выборка). "
+                "Находка только при росте счётчика, не по абсолютному числу.\r\n",
+                nC0);
+        } else if (nC0 >= 0) {
+            LectureAddF(szBuf, nBufLen,
+                "  Парковки при выключении (C0): %d. Контекст, не штраф. "
+                "Тренд: нет данных (нужна повторная выборка).\r\n",
+                nC0);
+        }
+        if (nC3 >= 0) {
+            LectureAddF(szBuf, nBufLen,
+                "  ECC (C3) RAW: %d. Тренд: нет данных (нужна повторная выборка). "
+                "Влияние на здоровье: нет. "
+                "ECC correction — штатный механизм NAND, это не неисправимые сектора. "
+                "Абсолютный RAW без тренда не оценивается.\r\n",
+                nC3);
+        }
+
+        LectureAdd(szBuf, nBufLen, "\r\nМатрица улик:\r\n");
+        LectureMatrixRow(szBuf, nBufLen, "Улика", "Значение", "Влияние");
+        LectureMatrixRow(szBuf, nBufLen, "SMART overall",
+                         (pInfo->bPredictFailure || pInfo->bThresholdViolation) ? "FAIL" : "PASS",
+                         (pInfo->bPredictFailure || pInfo->bThresholdViolation) ? "−" : "+");
+        if (pInfo->nReallocated >= 0)
+            LectureMatrixRow(szBuf, nBufLen, "Переназначенные", szR,
+                             pInfo->nReallocated == 0 ? "+" : "−");
+        if (pInfo->nPendingSectors >= 0)
+            LectureMatrixRow(szBuf, nBufLen, "Ожидающие", szPend,
+                             pInfo->nPendingSectors == 0 ? "+" : "−");
+        if (pInfo->nUncorrectable >= 0)
+            LectureMatrixRow(szBuf, nBufLen, "Неисправимые", szU,
+                             pInfo->nUncorrectable == 0 ? "+" : "−");
+        if (pInfo->nRemapEvents >= 0)
+            LectureMatrixRow(szBuf, nBufLen, "События переназначения", szRemap,
+                             pInfo->nRemapEvents == 0 ? "+" : "−");
+        if (pInfo->nCrcErrors >= 0)
+            LectureMatrixRow(szBuf, nBufLen, "CRC", szCrc,
+                             pInfo->nCrcErrors == 0 ? "+" : "−");
+        if (pInfo->nEndurancePercent >= 0) {
+            safe_snprintf(szLife, "%d%%", pInfo->nEndurancePercent);
+            LectureMatrixRow(szBuf, nBufLen, "Остаток ресурса", szLife, "+");
+        }
+        {
+            char szT[24];
+            if (pInfo->nTemperatureC > 0)
+                safe_snprintf(szT, "%d °C", pInfo->nTemperatureC);
+            else
+                safe_snprintf(szT, "нет данных");
+            LectureMatrixRow(szBuf, nBufLen, "Температура", szT, "0");
+        }
+        {
+            char szH[24];
+            if (pInfo->dwPowerOnHours > 0)
+                safe_snprintf(szH, "%lu ч", (unsigned long)pInfo->dwPowerOnHours);
+            else
+                safe_snprintf(szH, "нет данных");
+            LectureMatrixRow(szBuf, nBufLen, "Наработка", szH, "0");
+        }
+        if (nC3 >= 0) {
+            char szEcc[24];
+            safe_snprintf(szEcc, "%d", nC3);
+            LectureMatrixRow(szBuf, nBufLen, "ECC (C3)", szEcc, "UNKNOWN");
+        }
+        if (nB0 >= 0) {
+            char szB[24];
+            safe_snprintf(szB, "%d", nB0);
+            LectureMatrixRow(szBuf, nBufLen, "B0", szB, "UNKNOWN");
+        }
+        if (nB1 >= 0) {
+            char szB[24];
+            safe_snprintf(szB, "%d", nB1);
+            LectureMatrixRow(szBuf, nBufLen, "B1", szB, "UNKNOWN");
+        }
+        if (nF5 >= 0) {
+            char szB[24];
+            safe_snprintf(szB, "%d", nF5);
+            LectureMatrixRow(szBuf, nBufLen, "F5", szB, "UNKNOWN");
+        }
+        {
+            char szCtl[64];
+            const char* ctl = GetControllerName(pInfo->eController);
+            if (pInfo->eController == CONTROLLER_PHISON && nUnknown > 0)
+                safe_snprintf(szCtl, "Phison, упаковка RAW не подтверждена");
+            else
+                safe_snprintf(szCtl, "%s", ctl);
+            LectureMatrixRow(szBuf, nBufLen, "Контроллер", szCtl,
+                             nUnknown > 0 ? "−уверенность" : "0");
+        }
+
+        LectureAdd(szBuf, nBufLen, "\r\nИтог:\r\n");
+        if (pInfo->eHealthStatus == HEALTH_STATUS_GOOD)
+            LectureAdd(szBuf, nBufLen, "  GOOD because:\r\n");
+        else if (pInfo->eHealthStatus == HEALTH_STATUS_CAUTION)
+            LectureAdd(szBuf, nBufLen, "  CAUTION because:\r\n");
+        else
+            LectureAdd(szBuf, nBufLen, "  BAD because:\r\n");
+        LectureAddF(szBuf, nBufLen, "    %d сильных положительных признаков\r\n", nPos);
+        LectureAddF(szBuf, nBufLen, "    %d критических отказов\r\n", nCritFail);
+        LectureAddF(szBuf, nBufLen, "    %d признаков деградации носителя\r\n", nMediaDeg);
+        LectureAddF(szBuf, nBufLen, "    %d vendor-specific счётчиков не расшифрованы\r\n",
+                    nUnresolved);
+
+        LectureAdd(szBuf, nBufLen,
+            "Мы не переводим SMART Value/Worst/Threshold в процент здоровья: "
+            "нормализованная шкала 100 против 200 — это не «в два раза здоровее». "
+            "Сырые счётчики — факты, а не шкала от 0 до 100.\r\n");
+        if (pInfo->nEndurancePercent >= 0)
+            LectureAdd(szBuf, nBufLen,
+                "Заявленный остаток ресурса (A9) — цифра контроллера про износ NAND, "
+                "это не здоровье диска и не означает, что диск новый.\r\n");
+        else
+            LectureAdd(szBuf, nBufLen,
+                "Для этого диска заявленный остаток ресурса (износ) не задан — "
+                "процент не выдумывается.\r\n");
+        LectureAddUnknownIdList(szBuf, nBufLen, pInfo);
+    }
+}
+
+int CalculateHealthNVMe(DRIVE_INFO* pInfo)
+{
+    AssessDriveHealth(pInfo);
+    return pInfo ? pInfo->nHealthPercent : -1;
 }
 
 int CalculateHealth(DRIVE_INFO* pInfo)
 {
-    int i, j;
-    if (pInfo->bIsNVMe)
-        return CalculateHealthNVMe(pInfo);
-
-    if (pInfo->bPredictFailure)
-        return 0;
-
-    if (pInfo->bIsUSB && !pInfo->bSMART_Supported)
-        return -1;
-    for (i = 0; i < 30; i++) {
-        if (pInfo->attrData.stAttributes[i].bAttrID == 0xA9) {
-            DWORD dwLife = GetRawValue(pInfo->attrData.stAttributes[i].bRawValue);
-            if (dwLife > 0 && dwLife <= 100) {
-                for (j = 0; j < 30; j++) {
-                    SMART_ATTRIBUTE* pA = &pInfo->attrData.stAttributes[j];
-                    if (pA->bAttrID == 0) continue;
-                    BYTE bThresh = 0;
-                    int k;
-                    for (k = 0; k < 30; k++) {
-                        if (pInfo->threshData.stThresholds[k].bAttrID == pA->bAttrID) {
-                            bThresh = pInfo->threshData.stThresholds[k].bThresholdValue;
-                            break;
-                        }
-                    }
-                    if (bThresh > 0 && pA->bWorstValue > 0 && pA->bWorstValue <= bThresh)
-                        return 0;
-                }
-                return (int)dwLife;
-            }
-            break;
-        }
-    }
-
-    int nHealth = 100;
-
-    for (i = 0; i < 30; i++) {
-        SMART_ATTRIBUTE* pAttr = &pInfo->attrData.stAttributes[i];
-        if (pAttr->bAttrID != 0x05) continue;
-        DWORD dwRaw = GetRawValue(pAttr->bRawValue);
-        if (dwRaw > 0) {
-            int nPenalty = (int)dwRaw;
-            if (nPenalty > 100) nPenalty = 100;
-            nHealth -= nPenalty;
-        }
-        break;
-    }
-    if (nHealth < 0) nHealth = 0;
-    for (i = 0; i < 30; i++) {
-        SMART_ATTRIBUTE* pAttr = &pInfo->attrData.stAttributes[i];
-        if (pAttr->bAttrID != 0xC5) continue;
-        DWORD dwRaw = GetRawValue(pAttr->bRawValue);
-        if (dwRaw > 0) {
-            int nPenalty = (int)dwRaw * 2;
-            if (nPenalty > 100) nPenalty = 100;
-            nHealth -= nPenalty;
-        }
-        break;
-    }
-    if (nHealth < 0) nHealth = 0;
-
-    for (i = 0; i < 30; i++) {
-        SMART_ATTRIBUTE* pAttr = &pInfo->attrData.stAttributes[i];
-        if (pAttr->bAttrID != 0xC6) continue;
-        DWORD dwRaw = GetRawValue(pAttr->bRawValue);
-        if (dwRaw > 0) {
-            int nPenalty = (int)dwRaw * 3;
-            if (nPenalty > 100) nPenalty = 100;
-            nHealth -= nPenalty;
-        }
-        break;
-    }
-    if (nHealth < 0) nHealth = 0;
-
-    for (i = 0; i < 30; i++) {
-        SMART_ATTRIBUTE* pAttr = &pInfo->attrData.stAttributes[i];
-        if (pAttr->bAttrID == 0) continue;
-        if (pAttr->bAttrID == 0x05 || pAttr->bAttrID == 0xC5 || pAttr->bAttrID == 0xC6)
-            continue;
-        if (GetCritWeight(pAttr->bAttrID) == 0) continue;
-
-        BYTE bThresh = 0;
-        for (j = 0; j < 30; j++) {
-            if (pInfo->threshData.stThresholds[j].bAttrID == pAttr->bAttrID) {
-                bThresh = pInfo->threshData.stThresholds[j].bThresholdValue;
-                break;
-            }
-        }
-        if (bThresh == 0) continue;
-
-        BYTE bWorst = pAttr->bWorstValue;
-        if (bWorst == 0 || bWorst == 255) bWorst = pAttr->bAttrValue;
-        if (bWorst == 0 || bWorst == 255) continue;
-
-        if (bWorst <= bThresh)
-            return 0;
-
-        int nRange = 100 - (int)bThresh;
-        if (nRange <= 0) continue;
-        int nAttrHealth = ((int)bWorst - (int)bThresh) * 100 / nRange;
-        if (nAttrHealth > 100) nAttrHealth = 100;
-        if (nAttrHealth < nHealth) nHealth = nAttrHealth;
-    }
-
-    if (nHealth < 0)   nHealth = 0;
-    if (nHealth > 100) nHealth = 100;
-    return nHealth;
+    AssessDriveHealth(pInfo);
+    return pInfo ? pInfo->nHealthPercent : -1;
 }
 
-/* ============================================================
- * Health Status Determination
- *
- * Good:     All attributes within normal range
- * Caution:  Critical attr raw > 0, or advisory attr near threshold
- * Bad:      Threshold exceeded, or NVMe critical warning
- * Warning:  SMART predictive failure flag set
- * ============================================================ */
 DRIVE_HEALTH_STATUS DetermineHealthStatus(DRIVE_INFO* pInfo)
 {
-    int i;
-
-    /* Unknown / unsupported */
-    if (!pInfo->bSMART_Supported) return HEALTH_STATUS_UNKNOWN;
-    if (pInfo->nHealthPercent < 0) return HEALTH_STATUS_UNKNOWN;
-
-    /* SMART predictive failure = Warning */
-    if (pInfo->bPredictFailure) return HEALTH_STATUS_WARNING;
-
-    /* NVMe-specific checks */
-    if (pInfo->bIsNVMe) {
-        BYTE cw = pInfo->nvmeHealth.CriticalWarning;
-        if (cw & NVME_CRIT_WARN_READ_ONLY) return HEALTH_STATUS_BAD;
-        if (cw & NVME_CRIT_WARN_RELIABILITY_DEGRADED) return HEALTH_STATUS_BAD;
-        if (cw & NVME_CRIT_WARN_SPARE_BELOW_THRESH) return HEALTH_STATUS_CAUTION;
-        if (pInfo->qwNVMeMediaErrors > 0) return HEALTH_STATUS_CAUTION;
-        if (pInfo->nHealthPercent < 10) return HEALTH_STATUS_BAD;
-        if (pInfo->nHealthPercent < 50) return HEALTH_STATUS_CAUTION;
-        return HEALTH_STATUS_GOOD;
-    }
-
-    /* Check threshold violations = BAD */
-    for (i = 0; i < 30; i++) {
-        SMART_ATTRIBUTE* pAttr = &pInfo->attrData.stAttributes[i];
-        if (pAttr->bAttrID == 0) continue;
-
-        BYTE bThresh = FindThreshold(pInfo, pAttr->bAttrID);
-        if (bThresh == 0) continue;
-
-        BYTE bWorst = pAttr->bWorstValue;
-        if (bWorst == 0 || bWorst == 255) bWorst = pAttr->bAttrValue;
-        if (bWorst == 0 || bWorst == 255) continue;
-
-        if (bWorst <= bThresh) return HEALTH_STATUS_BAD;
-    }
-
-    /* Check critical raw values > 0 = CAUTION */
-    static const BYTE critRawIDs[] = {
-        0x05, /* Reallocated Sectors Count */
-        0x0A, /* Spin Retry Count */
-        0xC5, /* Current Pending Sectors */
-        0xC6, /* Uncorrectable Sectors */
-        0xAB, /* Program Fail Count */
-        0xAC, /* Erase Fail Count */
-        0xB5, /* Program Fail Count Total */
-        0xB6, /* Erase Fail Count Total */
-        0xB8, /* End-to-End Error */
-        0xBB, /* Uncorrectable ECC Error */
-        0xBC, /* Command Timeout */
-        0xC4, /* Reallocation Event Count */
-        0xC8, /* Write Error Rate */
-        0xCA, /* Data Address Mark Errors */
-        0xFC, /* Newly Added Bad Flash Block */
-        0x00
-    };
-
-    for (i = 0; critRawIDs[i] != 0; i++) {
-        int j;
-        for (j = 0; j < 30; j++) {
-            SMART_ATTRIBUTE* pAttr = &pInfo->attrData.stAttributes[j];
-            if (pAttr->bAttrID != critRawIDs[i]) continue;
-            DWORD dwRaw = GetRawValue(pAttr->bRawValue);
-            if (dwRaw > 0) return HEALTH_STATUS_CAUTION;
-            break;
-        }
-    }
-
-    /* Check error log entries = CAUTION */
-    if (pInfo->bGotErrorLog && pInfo->nErrorLogCount > 0)
-        return HEALTH_STATUS_CAUTION;
-
-    /* Check SSD life = CAUTION if low */
-    if (pInfo->nSSDLifeLeft >= 0 && pInfo->nSSDLifeLeft < 50)
-        return HEALTH_STATUS_CAUTION;
-
-    return HEALTH_STATUS_GOOD;
+    if (!pInfo) return HEALTH_STATUS_UNKNOWN;
+    AssessDriveHealth(pInfo);
+    return pInfo->eHealthStatus;
 }
 
 int CalculatePerformance(DRIVE_INFO* pInfo)
@@ -3238,6 +4609,7 @@ int CalculatePerformance(DRIVE_INFO* pInfo)
 void ExtractSSDIndicators(DRIVE_INFO* pInfo)
 {
     int i;
+    IdentifyDriveParts(pInfo);
     pInfo->nSSDLifeLeft     = -1;
     pInfo->nSSDTotalWritesGB = -1;
     pInfo->nSSDAvgEraseCount = -1;
@@ -3296,10 +4668,10 @@ void ExtractSSDIndicators(DRIVE_INFO* pInfo)
             /* 0xAD: Samsung = wear leveling only; Intel = avg erase only.
              * Other vendors may fill both when neither is set yet. */
             int nAd = (int)GetRawValue(pA->bRawValue);
-            if (pInfo->eVendor == VENDOR_SAMSUNG) {
+            if (pInfo->eController == CONTROLLER_SAMSUNG) {
                 if (pInfo->nSSDWearLevelingCount < 0)
                     pInfo->nSSDWearLevelingCount = nAd;
-            } else if (pInfo->eVendor == VENDOR_INTEL) {
+            } else if (pInfo->eController == CONTROLLER_INTEL) {
                 if (pInfo->nSSDAvgEraseCount < 0)
                     pInfo->nSSDAvgEraseCount = nAd;
             } else {
@@ -3336,6 +4708,7 @@ void ExtractSSDIndicators(DRIVE_INFO* pInfo)
 static void ExtractTemperatureFromATA(DRIVE_INFO* pInfo)
 {
     int i;
+    IdentifyDriveParts(pInfo);
     /* Primary: 0xC2 (Temperature) */
     for (i = 0; i < 30; i++) {
         SMART_ATTRIBUTE* pA = &pInfo->attrData.stAttributes[i];
@@ -3354,17 +4727,9 @@ static void ExtractTemperatureFromATA(DRIVE_INFO* pInfo)
             return;
         }
         if (pA->bAttrID == 0xE7 && pInfo->nTemperatureC < 0) {
-            /* Kingston/Phison A400 and similar: 0xE7 is life remaining, not °C. */
-            DRIVE_VENDOR ev = pInfo->eVendor;
-            DRIVE_TYPE   et = pInfo->eType;
-            BOOL bLifeVendor = (ev == VENDOR_KINGSTON || ev == VENDOR_ADATA ||
-                                ev == VENDOR_SKHYNIX || ev == VENDOR_KIOXIA);
-            BOOL bUnknownSsd = ((ev == VENDOR_UNKNOWN || ev == VENDOR_OTHER) &&
-                                (et == DRIVE_TYPE_SSD_SATA || et == DRIVE_TYPE_M2_SATA));
-            if (bLifeVendor || bUnknownSsd)
-                continue;
-            if (ev == VENDOR_TOSHIBA &&
-                (et == DRIVE_TYPE_SSD_SATA || et == DRIVE_TYPE_M2_SATA))
+            /* Phison: 0xE7 is life remaining, not °C. Brand (Kingston/ADATA)
+             * must not trigger this — only the controller. */
+            if (pInfo->eController == CONTROLLER_PHISON)
                 continue;
             {
                 int nT = (int)GetRawValue16Lo(pA->bRawValue);
@@ -4315,6 +5680,7 @@ BOOL RefreshDriveSmart(int nDriveIndex, DRIVE_INFO* pInfo)
     }
     pInfo->nPerformancePercent = CalculatePerformance(pInfo);
     pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
+    IdentifyDriveParts(pInfo);
 
     CloseHandle(hDrive);
     return TRUE;
@@ -4410,12 +5776,29 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
         pInfo->nDriveIndex    = nDrive;
         pInfo->nTemperatureC  = -1;
         pInfo->nHealthPercent = -1;
+        pInfo->nConfidence    = 0;
+        pInfo->nEndurancePercent = -1;
+        pInfo->eReliability   = HEALTH_STATUS_UNKNOWN;
+        pInfo->eInterface     = HEALTH_STATUS_UNKNOWN;
+        pInfo->eTempStatus    = HEALTH_STATUS_UNKNOWN;
+        pInfo->nReallocated   = -1;
+        pInfo->nPendingSectors = -1;
+        pInfo->nUncorrectable = -1;
+        pInfo->nRemapEvents   = -1;
+        pInfo->nCrcErrors     = -1;
+        pInfo->eTempBand      = TEMP_BAND_UNKNOWN;
+        pInfo->eNormQuality   = NORM_QUALITY_UNKNOWN;
+        pInfo->eRawQuality    = NORM_QUALITY_UNKNOWN;
+        pInfo->bThresholdViolation = FALSE;
+        pInfo->szEvidence[0]  = '\0';
         pInfo->nReadSpeedMBs  = -1;
         pInfo->nWriteSpeedMBs = -1;
         pInfo->eType          = DRIVE_TYPE_UNKNOWN;
         pInfo->eAccessMethod  = SMART_ACCESS_NONE;
         pInfo->eHealthStatus  = HEALTH_STATUS_UNKNOWN;
         pInfo->eVendor        = VENDOR_UNKNOWN;
+        pInfo->eController    = CONTROLLER_UNKNOWN;
+        pInfo->eNand          = NAND_UNKNOWN;
         pInfo->nSSDLifeLeft   = -1;
         pInfo->nSSDTotalWritesGB = -1;
         pInfo->nSSDAvgEraseCount = -1;
@@ -4442,7 +5825,7 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
             pInfo->eType               = DRIVE_TYPE_NVME;
             pInfo->bIsNVMe             = TRUE;
             pInfo->eHealthStatus       = DetermineHealthStatus(pInfo);
-            pInfo->eVendor             = DetectDriveVendor(pInfo->szModel);
+            IdentifyDriveParts(pInfo);
             FillDriveProtocol(pInfo);
 
             CloseHandle(hDrive);
@@ -4458,7 +5841,7 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
             pInfo->bSMART_Supported = FALSE;
             pInfo->nHealthPercent   = -1;
             pInfo->eHealthStatus    = HEALTH_STATUS_UNKNOWN;
-            pInfo->eVendor          = DetectDriveVendor(pInfo->szModel);
+            IdentifyDriveParts(pInfo);
             FillDriveProtocol(pInfo);
             CloseHandle(hDrive);
             nFound++;
@@ -4492,8 +5875,7 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
         if (busType == 7 && !pInfo->bIsUSB) pInfo->bIsUSB = TRUE;
         pInfo->eType = DetectDriveType(hDrive, pInfo);
 
-        /* Detect vendor */
-        pInfo->eVendor = DetectDriveVendor(pInfo->szModel);
+        IdentifyDriveParts(pInfo);
 
         if (pInfo->bIsUSB) {
             GetBridgeIdentity(hDrive, pInfo);
@@ -4764,6 +6146,7 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
         }
         pInfo->nPerformancePercent = CalculatePerformance(pInfo);
         pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
+        IdentifyDriveParts(pInfo);
         FillDriveProtocol(pInfo);
 
         CloseHandle(hDrive);

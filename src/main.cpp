@@ -42,7 +42,6 @@
 #include "mainwnd.h"
 #include "smart.h"
 #include "resource.h"
-#include "donate.h"
 #include "utf8ui.h"
 #include "safestr.h"
 
@@ -157,9 +156,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* ---- GDI objects (brushes, fonts) ----------------------------- */
     CreateGDIObjects();
 
-   
-    Donate_Startup(NULL);
-
     /* ---- Register the main window class --------------------------- */
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
@@ -186,23 +182,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     int nX    = (nScrW - WINDOW_W) / 2;
     int nY    = (nScrH - WINDOW_H) / 2;
 
-    HMENU hMenuBar  = CreateMenu();
-    HMENU hMenuFile = CreatePopupMenu();
-    HMENU hMenuHelp = CreatePopupMenu();
-    AppendMenuU8(hMenuFile, MF_STRING,    IDM_EXIT,        "В&ыход");
-    AppendMenuU8(hMenuHelp, MF_STRING,    IDM_DONATE,      "&Поддержать...");
-    AppendMenuU8(hMenuHelp, MF_SEPARATOR, 0,               NULL);
-    AppendMenuU8(hMenuHelp, MF_STRING,    IDM_ABOUT,       "&О программе...");
-    AppendMenuU8(hMenuBar,  MF_POPUP, (UINT_PTR)hMenuFile, "&Файл");
-    AppendMenuU8(hMenuBar,  MF_POPUP, (UINT_PTR)hMenuHelp, "&Справка");
-
+    /* Menu is created in CreateMenuBar (WM_CREATE). Pass NULL here so
+     * CreateWindow does not attach a duplicate stub menu. */
     HWND hWnd = CreateWindowExU8(
         0,
         "LLHDMonitorMainWnd",
         "DriveMonitor",
         WS_OVERLAPPEDWINDOW,
         nX, nY, WINDOW_W, WINDOW_H,
-        NULL, hMenuBar, hInstance, NULL
+        NULL, NULL, hInstance, NULL
     );
 
     if (!hWnd) {

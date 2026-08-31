@@ -26,8 +26,7 @@ OUTDIR  = bin
 TARGET  = $(OUTDIR)/DriveMonitor.exe
 SRCS    = $(SRCDIR)/main.cpp \
           $(SRCDIR)/mainwnd.cpp \
-          $(SRCDIR)/smart.cpp \
-          $(SRCDIR)/donate.cpp
+          $(SRCDIR)/smart.cpp
 
 OBJS    = $(patsubst $(SRCDIR)/%.cpp, $(OBJDIR)/%.o, $(SRCS))
 RES_O   = $(OBJDIR)/app_res.o
@@ -53,9 +52,9 @@ CFLAGS  = -mwindows -O2 \
 #                        the S.M.A.R.T. / SetupAPI code paths.
 LDFLAGS = -mwindows \
           -static -static-libgcc -static-libstdc++ \
-          -lcomctl32 -lmsimg32 -lshell32 \
+          -lcomctl32 -lcomdlg32 -lshell32 \
           -luser32 -lgdi32 -lkernel32 -ladvapi32 -lole32 -luuid \
-          -lgdiplus -lshlwapi -lsetupapi -lcfgmgr32 -ldwmapi
+          -lgdiplus -lshlwapi -lsetupapi -lcfgmgr32
 
 
 .PHONY: all clean

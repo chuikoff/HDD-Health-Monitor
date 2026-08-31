@@ -19,9 +19,10 @@ DriveMonitor is a renamed fork of HDDHealth Monitor. MIT does not require a rena
 - Unified SMART headline for every drive: **Запас · Износ · Записано** (missing values are —)
 - SMART is read once at start, on hotplug, and via **Перечитать**. No live monitoring, tray, graph, or surface test
 - Close on X quits the app. Window is resizable. Protocol shown (e.g. NVMe 1.2.1, SATA 6 Гбит/с)
-- Slight liquid-glass look (Mica / rounded corners on Windows 11; ignored on older Windows)
+- Health is GOOD / CAUTION / BAD / UNKNOWN from an evidence matrix (not a Health% formula). Unknown vendor RAW is unscored, not Bad
+- Split confidence (completeness, transport, model, decoder, assess). Temperature bands; power-on hours are context, not a penalty
 - Vendor-aware SMART names/RAW (Seagate, WD, Samsung, Kingston/Phison, ADATA, Toshiba, Micron, Hynix, Intel)
-- No tray, no unused refresh timers, no `IOCTL_STORAGE_PROTOCOL_COMMAND` in the tree
+- No tray, no unused refresh timers, no glass chrome, no `IOCTL_STORAGE_PROTOCOL_COMMAND` in the tree
 - Needs administrator rights
 
 ## Author
