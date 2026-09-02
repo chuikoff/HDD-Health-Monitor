@@ -18,7 +18,8 @@
 #include <string.h>
 
 #include "donate.h"
-#include "mainwnd.h"   /* for g_hInst, g_hFontSmall, g_hFontNormal */
+#include "lang.h"
+#include "mainwnd.h"   /* for g_hInst, g_nDpi */
 
 /* ------------------------------------------------------------------ */
 /*  Public: open GitHub Sponsors page                                 */
@@ -26,23 +27,17 @@
 
 BOOL Donate_OpenSponsorsPage(HWND hParent)
 {
-    /* ShellExecuteA with verb "open" launches the URL in the user's
-       default browser.  SW_SHOWNORMAL is the most portable choice. */
-    HINSTANCE hResult = ShellExecuteA(
+    HINSTANCE hResult = ShellExecuteW(
         hParent,
-        "open",
-        DONATE_URL,
+        L"open",
+        L"https://github.com/sponsors/arisohandriputra/",
         NULL, NULL,
         SW_SHOWNORMAL);
 
-    /* A result handle <= 32 indicates failure (per Win32 docs). */
     if ((INT_PTR)hResult <= 32) {
-        MessageBoxA(hParent,
-            "Unable to open the donations page in your default browser.\n"
-            "Please visit the following URL manually:\n\n"
-            DONATE_URL,
-            "Open Browser Failed",
-            MB_ICONWARNING | MB_OK);
+        wchar_t szMsg[512];
+        _snwprintf(szMsg, 512, LStrW(STR_DONATE_FAIL_MSG), L"https://github.com/sponsors/arisohandriputra/");
+        MessageBoxW(hParent, szMsg, LStrW(STR_DONATE_FAIL_TITLE), MB_ICONWARNING | MB_OK);
         return FALSE;
     }
     return TRUE;
@@ -59,87 +54,122 @@ static LRESULT CALLBACK DonateDlgProc(HWND hDlg, UINT uMsg,
     {
     case WM_CREATE:
         {
-            int cx = DONATE_DLG_W;
+            int dpi = g_nDpi > 0 ? g_nDpi : 96;
 
-            /* Bold title font used only inside this dialog. */
-            HFONT hFontBold = CreateFontA(-15, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+            RECT rcClient;
+            GetClientRect(hDlg, &rcClient);
+            int cx = rcClient.right - rcClient.left;
+            if (cx <= 0) cx = MulDiv(460, dpi, 96);
+
+            int padX = MulDiv(20, dpi, 96);
+            int wText = cx - padX * 2;
+
+            /* Bold title font */
+            HFONT hFontBold = CreateFontW(MulDiv(-15, dpi, 96), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+
+            HFONT hFontNorm = CreateFontW(MulDiv(-12, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+
+            HFONT hFontLink = CreateFontW(MulDiv(-12, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, TRUE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+
+            SetPropW(hDlg, L"f_bold", (HANDLE)hFontBold);
+            SetPropW(hDlg, L"f_norm", (HANDLE)hFontNorm);
+            SetPropW(hDlg, L"f_link", (HANDLE)hFontLink);
+
+            int curY = MulDiv(16, dpi, 96);
 
             /* ---- Header ------------------------------------------------- */
-            HWND hTitle = CreateWindowExA(0, "STATIC",
-                "Support HDDHealth Monitor",
+            HWND hTitle = CreateWindowExW(0, L"STATIC",
+                LStrW(STR_DONATE_HEADER),
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
-                20, 16, cx - 40, 22, hDlg, NULL, g_hInst, NULL);
-            SendMessageA(hTitle, WM_SETFONT, (WPARAM)hFontBold, TRUE);
+                padX, curY, wText, MulDiv(22, dpi, 96), hDlg, NULL, g_hInst, NULL);
+            SendMessageW(hTitle, WM_SETFONT, (WPARAM)hFontBold, TRUE);
 
-            CreateWindowExA(0, "STATIC", "",
+            curY += MulDiv(28, dpi, 96);
+            CreateWindowExW(0, L"STATIC", L"",
                 WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                20, 46, cx - 40, 2, hDlg, NULL, g_hInst, NULL);
+                padX, curY, wText, 2, hDlg, NULL, g_hInst, NULL);
 
             /* ---- Explanation text -------------------------------------- */
-            HWND hExplain = CreateWindowExA(0, "STATIC",
-                "HDDHealth Monitor is 100% Free and Open Source Software.\n"
-                "There is no license key, no trial, and no activation.\n"
-                "All features are available to every user, free of charge.\n\n"
-                "If you find this tool useful and would like to support\n"
-                "ongoing development, please consider becoming a sponsor.",
+            curY += MulDiv(10, dpi, 96);
+            int explainH = MulDiv(90, dpi, 96);
+            HWND hExplain = CreateWindowExW(0, L"STATIC",
+                LStrW(STR_DONATE_EXPLAIN),
                 WS_CHILD | WS_VISIBLE,
-                20, 56, cx - 40, 96, hDlg, NULL, g_hInst, NULL);
-            SendMessageA(hExplain, WM_SETFONT, (WPARAM)g_hFontSmall, TRUE);
+                padX, curY, wText, explainH, hDlg, NULL, g_hInst, NULL);
+            SendMessageW(hExplain, WM_SETFONT, (WPARAM)hFontNorm, TRUE);
 
-            CreateWindowExA(0, "STATIC", "",
+            curY += explainH + MulDiv(10, dpi, 96);
+            CreateWindowExW(0, L"STATIC", L"",
                 WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                20, 158, cx - 40, 2, hDlg, NULL, g_hInst, NULL);
+                padX, curY, wText, 2, hDlg, NULL, g_hInst, NULL);
 
             /* ---- Author / sponsor attribution -------------------------- */
-            char authorLine[128];
-            _snprintf(authorLine, sizeof(authorLine),
-                "Author : %s (%s)", DONATE_AUTHOR, DONATE_COMPANY);
-            HWND hAuthor = CreateWindowExA(0, "STATIC", authorLine,
+            curY += MulDiv(10, dpi, 96);
+            wchar_t authorLine[128];
+            _snwprintf(authorLine, 128,
+                LStrW(STR_DONATE_AUTHOR_LINE), L"Ari Sohandri Putra", L"ARImetic Inc.");
+            HWND hAuthor = CreateWindowExW(0, L"STATIC", authorLine,
                 WS_CHILD | WS_VISIBLE | SS_CENTER,
-                20, 168, cx - 40, 18, hDlg, NULL, g_hInst, NULL);
-            SendMessageA(hAuthor, WM_SETFONT, (WPARAM)g_hFontSmall, TRUE);
+                padX, curY, wText, MulDiv(20, dpi, 96), hDlg, NULL, g_hInst, NULL);
+            SendMessageW(hAuthor, WM_SETFONT, (WPARAM)hFontNorm, TRUE);
 
-            /* The link control displays the sponsor URL itself so the user
-               can copy it even if they choose not to click. */
-            HWND hLink = CreateWindowExA(0, "STATIC", DONATE_URL,
+            curY += MulDiv(22, dpi, 96);
+            HWND hLink = CreateWindowExW(0, L"STATIC", L"https://github.com/sponsors/arisohandriputra/",
                 WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOTIFY,
-                20, 190, cx - 40, 20, hDlg,
+                padX, curY, wText, MulDiv(20, dpi, 96), hDlg,
                 (HMENU)IDC_DONATE_LINK_STATIC, g_hInst, NULL);
+            SendMessageW(hLink, WM_SETFONT, (WPARAM)hFontLink, TRUE);
 
-            /* Underlined "link-style" font for the URL static. */
-            HFONT hFontLink = CreateFontA(-12, 0, 0, 0, FW_NORMAL,
-                FALSE, TRUE, FALSE,
-                ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
-            SendMessageA(hLink, WM_SETFONT, (WPARAM)hFontLink, TRUE);
-
-            CreateWindowExA(0, "STATIC", "",
+            curY += MulDiv(26, dpi, 96);
+            CreateWindowExW(0, L"STATIC", L"",
                 WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                20, 220, cx - 40, 2, hDlg, NULL, g_hInst, NULL);
+                padX, curY, wText, 2, hDlg, NULL, g_hInst, NULL);
 
             /* ---- Buttons ------------------------------------------------ */
-            HWND hDonate = CreateWindowExA(0, "BUTTON", "Donate",
-                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                (cx - 240) / 2, 236, 110, 30, hDlg,
-                (HMENU)IDC_DONATE_OPEN_BTN, g_hInst, NULL);
-            SendMessageA(hDonate, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+            curY += MulDiv(14, dpi, 96);
+            int btnW = MulDiv(110, dpi, 96);
+            int btnH = MulDiv(30, dpi, 96);
+            int btnGap = MulDiv(20, dpi, 96);
+            int totalBtnW = btnW * 2 + btnGap;
+            int btnStartX = (cx - totalBtnW) / 2;
 
-            HWND hClose = CreateWindowExA(0, "BUTTON", "Close",
+            HWND hDonate = CreateWindowExW(0, L"BUTTON", LStrW(STR_BTN_DONATE),
+                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                btnStartX, curY, btnW, btnH, hDlg,
+                (HMENU)IDC_DONATE_OPEN_BTN, g_hInst, NULL);
+            SendMessageW(hDonate, WM_SETFONT, (WPARAM)hFontNorm, TRUE);
+
+            HWND hClose = CreateWindowExW(0, L"BUTTON", LStrW(STR_BTN_CLOSE),
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                (cx - 240) / 2 + 130, 236, 110, 30, hDlg,
+                btnStartX + btnW + btnGap, curY, btnW, btnH, hDlg,
                 (HMENU)IDC_DONATE_CLOSE_BTN, g_hInst, NULL);
-            SendMessageA(hClose, WM_SETFONT, (WPARAM)g_hFontNormal, TRUE);
+            SendMessageW(hClose, WM_SETFONT, (WPARAM)hFontNorm, TRUE);
         }
         return 0;
+
+    case WM_CTLCOLORSTATIC:
+        {
+            HWND hCtrl = (HWND)lParam;
+            int  nID   = GetDlgCtrlID(hCtrl);
+            HDC  hdcSt = (HDC)wParam;
+            SetBkMode(hdcSt, TRANSPARENT);
+            if (nID == IDC_DONATE_LINK_STATIC) {
+                SetTextColor(hdcSt, RGB(0, 102, 204));
+            }
+            return (LRESULT)(HBRUSH)(COLOR_WINDOW + 1);
+        }
 
     case WM_COMMAND:
         {
             int nCtrl = LOWORD(wParam);
 
             if (nCtrl == IDC_DONATE_OPEN_BTN) {
-                /* User clicked the Donate button - launch the sponsors page. */
                 Donate_OpenSponsorsPage(hDlg);
                 return 0;
             }
@@ -149,8 +179,6 @@ static LRESULT CALLBACK DonateDlgProc(HWND hDlg, UINT uMsg,
                 return 0;
             }
 
-            /* Clicking the URL static also opens the browser - convenient
-               for users who cannot tell a static can be clicked. */
             if (nCtrl == IDC_DONATE_LINK_STATIC &&
                 HIWORD(wParam) == STN_CLICKED) {
                 Donate_OpenSponsorsPage(hDlg);
@@ -165,12 +193,26 @@ static LRESULT CALLBACK DonateDlgProc(HWND hDlg, UINT uMsg,
         }
         return 0;
 
+    case WM_DESTROY:
+        {
+            HFONT f1 = (HFONT)GetPropW(hDlg, L"f_bold");
+            HFONT f2 = (HFONT)GetPropW(hDlg, L"f_norm");
+            HFONT f3 = (HFONT)GetPropW(hDlg, L"f_link");
+            if (f1) DeleteObject(f1);
+            if (f2) DeleteObject(f2);
+            if (f3) DeleteObject(f3);
+            RemovePropW(hDlg, L"f_bold");
+            RemovePropW(hDlg, L"f_norm");
+            RemovePropW(hDlg, L"f_link");
+        }
+        return 0;
+
     case WM_CLOSE:
         DestroyWindow(hDlg);
         return 0;
     }
 
-    return DefWindowProcA(hDlg, uMsg, wParam, lParam);
+    return DefWindowProcW(hDlg, uMsg, wParam, lParam);
 }
 
 /* ------------------------------------------------------------------ */
@@ -179,48 +221,55 @@ static LRESULT CALLBACK DonateDlgProc(HWND hDlg, UINT uMsg,
 
 void Donate_ShowDialog(HWND hParent)
 {
-    /* Register the dialog window class exactly once per process. */
     static BOOL bRegistered = FALSE;
     if (!bRegistered) {
-        WNDCLASSEXA wc;
+        WNDCLASSEXW wc;
         ZeroMemory(&wc, sizeof(wc));
         wc.cbSize        = sizeof(wc);
         wc.lpfnWndProc   = DonateDlgProc;
         wc.hInstance     = g_hInst;
-        wc.hCursor       = LoadCursorA(NULL, IDC_ARROW);
+        wc.hCursor       = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpszClassName = "LLHDDonateDlg";
-        RegisterClassExA(&wc);
+        wc.lpszClassName = L"LLHDDonateDlg";
+        RegisterClassExW(&wc);
         bRegistered = TRUE;
     }
 
-    /* If a donate dialog is already open, just bring it forward. */
-    HWND hExist = FindWindowA("LLHDDonateDlg", NULL);
+    HWND hExist = FindWindowW(L"LLHDDonateDlg", NULL);
     if (hExist) {
         SetForegroundWindow(hExist);
         return;
     }
 
-    /* Center on the parent window (or on screen if no parent). */
+    int dpi = g_nDpi > 0 ? g_nDpi : 96;
+    int dlgW = MulDiv(460, dpi, 96);
+    int dlgH = MulDiv(330, dpi, 96);
+
     int scrW = GetSystemMetrics(SM_CXSCREEN);
     int scrH = GetSystemMetrics(SM_CYSCREEN);
     int x, y;
     if (hParent) {
         RECT rcP;
         GetWindowRect(hParent, &rcP);
-        x = rcP.left + ((rcP.right  - rcP.left) - DONATE_DLG_W) / 2;
-        y = rcP.top  + ((rcP.bottom - rcP.top ) - DONATE_DLG_H) / 2;
+        x = rcP.left + ((rcP.right  - rcP.left) - dlgW) / 2;
+        y = rcP.top  + ((rcP.bottom - rcP.top ) - dlgH) / 2;
     } else {
-        x = (scrW - DONATE_DLG_W) / 2;
-        y = (scrH - DONATE_DLG_H) / 2;
+        x = (scrW - dlgW) / 2;
+        y = (scrH - dlgH) / 2;
     }
 
-    HWND hDlg = CreateWindowExA(
+    RECT rcAdj = {0, 0, dlgW, dlgH};
+    AdjustWindowRectEx(&rcAdj, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                       FALSE, WS_EX_DLGMODALFRAME);
+    int winW = rcAdj.right - rcAdj.left;
+    int winH = rcAdj.bottom - rcAdj.top;
+
+    HWND hDlg = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
-        "LLHDDonateDlg",
-        "HDDHealth Monitor - Donate",
+        L"LLHDDonateDlg",
+        LStrW(STR_DONATE_TITLE),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        x, y, DONATE_DLG_W, DONATE_DLG_H,
+        x, y, winW, winH,
         hParent, NULL, g_hInst, NULL);
 
     if (!hDlg) return;
@@ -229,12 +278,11 @@ void Donate_ShowDialog(HWND hParent)
     UpdateWindow(hDlg);
     SetFocus(hDlg);
 
-    /* Modal-style message loop - runs until the dialog is closed. */
     MSG msg;
-    while (IsWindow(hDlg) && GetMessageA(&msg, NULL, 0, 0)) {
-        if (!IsDialogMessageA(hDlg, &msg)) {
+    while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0)) {
+        if (!IsDialogMessageW(hDlg, &msg)) {
             TranslateMessage(&msg);
-            DispatchMessageA(&msg);
+            DispatchMessageW(&msg);
         }
     }
 }
@@ -245,10 +293,6 @@ void Donate_ShowDialog(HWND hParent)
 
 BOOL Donate_Startup(HWND hParent)
 {
-    /* Intentionally empty.  The program is unconditionally free, so
-       there is no registration, no trial timer, and no install-date
-       tracking to perform.  Kept only so the existing main.cpp call
-       site does not require a separate patch. */
     (void)hParent;
     return TRUE;
 }

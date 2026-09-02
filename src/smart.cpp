@@ -813,19 +813,6 @@ BOOL IsNVMeDrive(HANDLE hDrive)
                     strstr(szUpper, "NL6221"))
                     return TRUE;
             }
-
-            /* Check vendor name for known NVMe bridge makers */
-            if (pDesc->VendorIdOffset && pDesc->VendorIdOffset < dwDevBytes) {
-                const char* pVen = (const char*)devBuf + pDesc->VendorIdOffset;
-                char szUpperV[33];
-                int k;
-                for (k = 0; k < 32 && pVen[k]; k++)
-                    szUpperV[k] = (char)toupper((unsigned char)pVen[k]);
-                szUpperV[k] = '\0';
-
-                /* Don't return TRUE for just "JMicron" etc. since they also make
-                 * SATA bridges. Only return if combined with other indicators. */
-            }
         }
     }
     return FALSE;
@@ -2086,10 +2073,17 @@ BOOL GetNVMeIdentifyController(HANDLE hDrive, DRIVE_INFO* pInfo)
             buf, sizeof(buf), buf, sizeof(buf), &dwBytes, NULL) || dwBytes < 128)
         return FALSE;
 
-    BYTE* pData = buf + sizeof(ULONG)*2 + sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA);
+    DWORD dwHeaderSize = (DWORD)(sizeof(ULONG)*2 + sizeof(MY_STORAGE_PROTOCOL_SPECIFIC_DATA));
+    if (dwBytes <= dwHeaderSize)
+        return FALSE;
+
+    BYTE* pData = buf + dwHeaderSize;
+    DWORD dwPayload = dwBytes - dwHeaderSize;
+    DWORD dwCopy = (dwPayload < sizeof(NVME_IDENTIFY_CONTROLLER)) ? dwPayload : sizeof(NVME_IDENTIFY_CONTROLLER);
 
     /* Store full identify controller data */
-    memcpy(&pInfo->nvmeIdent, pData, sizeof(NVME_IDENTIFY_CONTROLLER));
+    ZeroMemory(&pInfo->nvmeIdent, sizeof(NVME_IDENTIFY_CONTROLLER));
+    memcpy(&pInfo->nvmeIdent, pData, dwCopy);
     pInfo->bGotNVMeIdent = TRUE;
 
     /* Extract key strings (NVMe uses direct ASCII, no byte-swap needed) */

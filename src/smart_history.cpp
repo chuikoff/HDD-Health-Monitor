@@ -30,6 +30,7 @@
 #include <time.h>
 #include "smart_history.h"
 #include "mainwnd.h"
+#include "lang.h"
 
 const BYTE g_HistoryAttrIDs[HISTORY_TRACKED_ATTRS] = {
     0xC2,
@@ -240,11 +241,35 @@ static COLORREF s_LineColors[HISTORY_TRACKED_ATTRS + 1] = {
     RGB(140, 200, 100),
 };
 
+static int GetGraphDpi(HWND hWnd)
+{
+    typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
+    HMODULE hUser32 = GetModuleHandleA("user32.dll");
+    if (hUser32) {
+        GetDpiForWindowFn pfn = (GetDpiForWindowFn)GetProcAddress(hUser32, "GetDpiForWindow");
+        if (pfn && hWnd) {
+            UINT dpi = pfn(hWnd);
+            if (dpi > 0) return (int)dpi;
+        }
+    }
+    HDC hdc = GetDC(hWnd);
+    int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+    ReleaseDC(hWnd, hdc);
+    return dpi > 0 ? dpi : 96;
+}
+
 void Graph_Paint(HDC hdc, const RECT* prc,
                  const DRIVE_HISTORY* pHist,
                  int nAttrIdx,
                  HFONT hFontSmall, HFONT hFontNormal)
 {
+    if (!pHist || !prc) return;
+
+    int dpi = GetGraphDpi(g_hGraphWnd);
+    int mL = MulDiv(54, dpi, 96);
+    int mR = MulDiv(16, dpi, 96);
+    int mT = MulDiv(26, dpi, 96);
+    int mB = MulDiv(36, dpi, 96);
 
     HBRUSH hbrBg = CreateSolidBrush(RGB(245, 247, 252));
     FillRect(hdc, prc, hbrBg);
@@ -252,7 +277,6 @@ void Graph_Paint(HDC hdc, const RECT* prc,
 
     int W  = prc->right  - prc->left;
     int H  = prc->bottom - prc->top;
-    int mL = 54, mR = 16, mT = 24, mB = 36;
     int gW = W - mL - mR;
     int gH = H - mT - mB;
     if (gW < 20 || gH < 20) return;
@@ -289,24 +313,23 @@ void Graph_Paint(HDC hdc, const RECT* prc,
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(100, 105, 120));
 
-    const char* szTitle = (nAttrIdx < 0) ? "Health (%)" :
-                          g_HistoryAttrShortNames[nAttrIdx];
+    const wchar_t* szTitleW = (nAttrIdx < 0) ? LStrW(STR_HIST_TAB_HEALTH) :
+                              Lang_GetHistoryTrackedAttrNameW(nAttrIdx);
     {
         RECT rcTitle = { prc->left, prc->top + 4, prc->right, prc->top + mT };
         SetTextColor(hdc, RGB(30, 35, 50));
         SelectObject(hdc, hFontNormal);
-        DrawTextA(hdc, szTitle, -1, &rcTitle, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, szTitleW, -1, &rcTitle, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SelectObject(hdc, hFontSmall);
         SetTextColor(hdc, RGB(100, 105, 120));
     }
 
     int n = pHist->nSampleCount;
     if (n < 2) {
-
         RECT rcMsg = { prc->left + mL, prc->top + mT,
                        prc->left + mL + gW, prc->top + mT + gH };
         SetTextColor(hdc, RGB(150, 155, 170));
-        DrawTextA(hdc, "Collecting data...\n(refreshes every 5 seconds)", -1,
+        DrawTextW(hdc, LStrW(STR_HIST_NO_DATA), -1,
                   &rcMsg, DT_CENTER | DT_VCENTER);
         SelectObject(hdc, hOldFont);
         return;
@@ -339,23 +362,23 @@ void Graph_Paint(HDC hdc, const RECT* prc,
 
     if (nAttrIdx < 0) { valMin = 0; valMax = 100; }
 
-    char szNum[32];
+    wchar_t szNumW[32];
     for (gi = 0; gi <= 5; gi++) {
         DWORD v = valMin + (DWORD)((double)(valMax - valMin) * (5 - gi) / 5.0);
-        _snprintf(szNum, sizeof(szNum), "%lu", (unsigned long)v);
-        int y = prc->top + mT + gH * gi / 5 - 6;
-        RECT rcLbl = { prc->left, y, prc->left + mL - 4, y + 14 };
-        DrawTextA(hdc, szNum, -1, &rcLbl, DT_RIGHT | DT_SINGLELINE);
+        _snwprintf(szNumW, 32, L"%lu", (unsigned long)v);
+        int y = prc->top + mT + gH * gi / 5 - MulDiv(6, dpi, 96);
+        RECT rcLbl = { prc->left, y, prc->left + mL - 4, y + MulDiv(16, dpi, 96) };
+        DrawTextW(hdc, szNumW, -1, &rcLbl, DT_RIGHT | DT_SINGLELINE);
     }
 
     {
-        char szX0[8] = "-N";
-        _snprintf(szX0, sizeof(szX0), "-%d", n);
+        wchar_t szX0[16];
+        _snwprintf(szX0, 16, L"-%d", n);
         int yLbl = prc->top + mT + gH + 2;
-        RECT rc0 = { prc->left + mL - 10, yLbl, prc->left + mL + 30, yLbl + 14 };
-        DrawTextA(hdc, szX0, -1, &rc0, DT_LEFT | DT_SINGLELINE);
-        RECT rc1 = { prc->left + mL + gW - 20, yLbl, prc->left + mL + gW + 20, yLbl + 14 };
-        DrawTextA(hdc, "now", -1, &rc1, DT_CENTER | DT_SINGLELINE);
+        RECT rc0 = { prc->left + mL - 10, yLbl, prc->left + mL + 30, yLbl + MulDiv(16, dpi, 96) };
+        DrawTextW(hdc, szX0, -1, &rc0, DT_LEFT | DT_SINGLELINE);
+        RECT rc1 = { prc->left + mL + gW - 20, yLbl, prc->left + mL + gW + 20, yLbl + MulDiv(16, dpi, 96) };
+        DrawTextW(hdc, L"now", -1, &rc1, DT_CENTER | DT_SINGLELINE);
     }
 
     SelectObject(hdc, hOldFont);
@@ -391,19 +414,21 @@ void Graph_Paint(HDC hdc, const RECT* prc,
     DeleteObject(hPenDot);
 
     if (n > 0) {
-        char szCur[48];
+        wchar_t szCurW[64];
+        BOOL bZH = (Lang_GetCurrent() == LANG_ZH_CN);
         if (nAttrIdx < 0)
-            _snprintf(szCur, sizeof(szCur), "Current: %d%%", pHist->aSamples[(pHist->nWriteHead + HISTORY_MAX_SAMPLES - 1) % HISTORY_MAX_SAMPLES].nHealthPercent);
+            _snwprintf(szCurW, 64, bZH ? L"当前值: %d%%" : L"Current: %d%%",
+                       pHist->aSamples[(pHist->nWriteHead + HISTORY_MAX_SAMPLES - 1) % HISTORY_MAX_SAMPLES].nHealthPercent);
         else
-            _snprintf(szCur, sizeof(szCur), "Current: %lu",
+            _snwprintf(szCurW, 64, bZH ? L"当前值: %lu" : L"Current: %lu",
                       (unsigned long)pHist->aSamples[(pHist->nWriteHead + HISTORY_MAX_SAMPLES - 1) % HISTORY_MAX_SAMPLES].dwAttrRaw[nAttrIdx]);
 
         SelectObject(hdc, hFontSmall);
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, clrLine);
-        RECT rcCur = { prc->left + mL, prc->top + mT - 18,
+        RECT rcCur = { prc->left + mL, prc->top + mT - MulDiv(18, dpi, 96),
                        prc->left + mL + gW, prc->top + mT };
-        DrawTextA(hdc, szCur, -1, &rcCur, DT_RIGHT | DT_SINGLELINE);
+        DrawTextW(hdc, szCurW, -1, &rcCur, DT_RIGHT | DT_SINGLELINE);
         SelectObject(hdc, hOldFont);
     }
 }
@@ -420,13 +445,14 @@ static LRESULT CALLBACK GraphWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
             RECT rc;
             GetClientRect(hWnd, &rc);
 
-            int nTabH = 28;
+            int dpi = GetGraphDpi(hWnd);
+            int nTabH = MulDiv(30, dpi, 96);
 
             HBRUSH hbrBg = CreateSolidBrush(RGB(240, 242, 247));
             FillRect(hdc, &rc, hbrBg);
             DeleteObject(hbrBg);
 
-            const char* szTabs[] = { "Health %", "Attribute" };
+            const wchar_t* szTabsW[] = { LStrW(STR_HIST_TAB_HEALTH), LStrW(STR_HIST_TAB_ATTRS) };
             int t;
             for (t = 0; t < 2; t++) {
                 int tx = rc.left + t * (rc.right - rc.left) / 2;
@@ -451,7 +477,7 @@ static LRESULT CALLBACK GraphWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, (t == g_nGraphTab) ? RGB(30,35,50) : RGB(100,105,120));
                 SelectObject(hdc, g_hGraphFontNm);
-                DrawTextA(hdc, szTabs[t], -1, &rcTab,
+                DrawTextW(hdc, szTabsW[t], -1, &rcTab,
                           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
 
@@ -470,13 +496,13 @@ static LRESULT CALLBACK GraphWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
 
             int nCtrlH = 0;
             if (g_nGraphTab == GRAPH_TAB_ATTR) {
-                nCtrlH = 30;
+                nCtrlH = MulDiv(32, dpi, 96);
             }
 
-            RECT rcGraph = { rc.left + 8,
-                             rc.top + nTabH + nCtrlH + 8,
-                             rc.right - 8,
-                             rc.bottom - 8 };
+            RECT rcGraph = { rc.left + MulDiv(8, dpi, 96),
+                             rc.top + nTabH + nCtrlH + MulDiv(8, dpi, 96),
+                             rc.right - MulDiv(8, dpi, 96),
+                             rc.bottom - MulDiv(8, dpi, 96) };
 
             if (nDriveSlot >= 0) {
                 int nAttr = (g_nGraphTab == GRAPH_TAB_HEALTH) ? -1 : g_nGraphAttr;
@@ -491,8 +517,7 @@ static LRESULT CALLBACK GraphWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, RGB(150,155,170));
                 SelectObject(hdc, g_hGraphFontNm);
-                DrawTextA(hdc, "No history data available yet.\n"
-                               "Data is recorded every 5 seconds.",
+                DrawTextW(hdc, LStrW(STR_HIST_NO_DATA),
                           -1, &rcGraph, DT_CENTER | DT_VCENTER);
             }
 
@@ -502,10 +527,10 @@ static LRESULT CALLBACK GraphWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
 
     case WM_LBUTTONDOWN:
         {
-
             RECT rc;
             GetClientRect(hWnd, &rc);
-            int nTabH = 28;
+            int dpi = GetGraphDpi(hWnd);
+            int nTabH = MulDiv(30, dpi, 96);
             int mx = LOWORD(lParam);
             int my = HIWORD(lParam);
             if (my < nTabH) {
@@ -531,7 +556,7 @@ static LRESULT CALLBACK GraphWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
 
             if (id == IDC_GRAPH_COMBO_ATTR && evt == CBN_SELCHANGE) {
                 HWND hCombo = GetDlgItem(hWnd, IDC_GRAPH_COMBO_ATTR);
-                int sel = (int)SendMessageA(hCombo, CB_GETCURSEL, 0, 0);
+                int sel = (int)SendMessageW(hCombo, CB_GETCURSEL, 0, 0);
                 if (sel >= 0 && sel < HISTORY_TRACKED_ATTRS) {
                     g_nGraphAttr = sel;
                     InvalidateRect(hWnd, NULL, TRUE);
@@ -539,9 +564,9 @@ static LRESULT CALLBACK GraphWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
             }
             if (id == IDC_GRAPH_BTN_CLEAR) {
                 if (g_nGraphDrive >= 0 && g_nGraphDrive < g_nDriveCount) {
-                    if (MessageBoxA(hWnd,
-                        "Clear all recorded history for this drive?",
-                        "HDDHealth Monitor", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                    if (MessageBoxW(hWnd,
+                        (Lang_GetCurrent() == LANG_ZH_CN ? L"是否清除此硬盘的所有历史记录？" : L"Clear all recorded history for this drive?"),
+                        LStrW(STR_APP_TITLE), MB_YESNO | MB_ICONQUESTION) == IDYES) {
                         History_Clear(g_Drives[g_nGraphDrive].szSerial);
                         InvalidateRect(hWnd, NULL, TRUE);
                     }
@@ -552,14 +577,18 @@ static LRESULT CALLBACK GraphWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
 
     case WM_SIZE:
         {
-
             HWND hCombo = GetDlgItem(hWnd, IDC_GRAPH_COMBO_ATTR);
             HWND hClear = GetDlgItem(hWnd, IDC_GRAPH_BTN_CLEAR);
             int W2 = LOWORD(lParam);
+            int dpi = GetGraphDpi(hWnd);
+            int tabH = MulDiv(30, dpi, 96);
+            int comboY = tabH + MulDiv(4, dpi, 96);
+            int btnW = MulDiv(110, dpi, 96);
+            int btnH = MulDiv(24, dpi, 96);
             if (hCombo)
-                SetWindowPos(hCombo, NULL, 8, 32, W2 - 100, 22, SWP_NOZORDER);
+                SetWindowPos(hCombo, NULL, MulDiv(8, dpi, 96), comboY, W2 - btnW - MulDiv(24, dpi, 96), btnH, SWP_NOZORDER);
             if (hClear)
-                SetWindowPos(hClear, NULL, W2 - 88, 32, 80, 22, SWP_NOZORDER);
+                SetWindowPos(hClear, NULL, W2 - btnW - MulDiv(8, dpi, 96), comboY, btnW, btnH, SWP_NOZORDER);
         }
         return 0;
 
@@ -573,20 +602,20 @@ static LRESULT CALLBACK GraphWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM
         if (g_hGraphFontNm) { DeleteObject(g_hGraphFontNm); g_hGraphFontNm = NULL; }
         return 0;
     }
-    return DefWindowProcA(hWnd, uMsg, wParam, lParam);
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
 void Graph_RegisterClass(HINSTANCE hInst)
 {
-    WNDCLASSA wc;
+    WNDCLASSW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = GraphWndProc;
     wc.hInstance     = hInst;
     wc.hCursor       = LoadCursorA(NULL, (LPCSTR)IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.lpszClassName = LLHD_GRAPH_CLASS;
-    RegisterClassA(&wc);
+    wc.lpszClassName = L"LLHDGraphWnd";
+    RegisterClassW(&wc);
 }
 
 void Graph_ShowWindow(HWND hParent, HINSTANCE hInst, int nDriveIdx)
@@ -594,76 +623,82 @@ void Graph_ShowWindow(HWND hParent, HINSTANCE hInst, int nDriveIdx)
     g_nGraphDrive = nDriveIdx;
 
     if (!g_hGraphWnd) {
+        int dpi = GetGraphDpi(hParent);
 
-        g_hGraphFontSm = CreateFontA(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                     ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        if (g_hGraphFontSm) DeleteObject(g_hGraphFontSm);
+        if (g_hGraphFontNm) DeleteObject(g_hGraphFontNm);
+
+        g_hGraphFontSm = CreateFontW(MulDiv(-11, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                                     "Segoe UI");
-        g_hGraphFontNm = CreateFontA(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                                     ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                     L"Microsoft YaHei UI");
+        g_hGraphFontNm = CreateFontW(MulDiv(-13, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                      CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                                     "Segoe UI");
+                                     L"Microsoft YaHei UI");
 
         RECT rcMain;
         GetWindowRect(hParent, &rcMain);
-        int gx = rcMain.right + 8;
+        int gw = MulDiv(580, dpi, 96), gh = MulDiv(400, dpi, 96);
+        int gx = rcMain.right + MulDiv(8, dpi, 96);
         int gy = rcMain.top;
-        int gw = 520, gh = 370;
 
         int sw = GetSystemMetrics(SM_CXSCREEN);
         int sh = GetSystemMetrics(SM_CYSCREEN);
-        if (gx + gw > sw) gx = rcMain.left - gw - 8;
-        if (gx < 0) gx = 80;
+        if (gx + gw > sw) gx = rcMain.left - gw - MulDiv(8, dpi, 96);
+        if (gx < 0) gx = 40;
         if (gy + gh > sh) gy = sh - gh - 40;
         if (gy < 0) gy = 40;
 
-        g_hGraphWnd = CreateWindowExA(
+        g_hGraphWnd = CreateWindowExW(
             WS_EX_TOOLWINDOW,
-            LLHD_GRAPH_CLASS,
-            "S.M.A.R.T. History",
+            L"LLHDGraphWnd",
+            LStrW(STR_HIST_TITLE),
             WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX,
             gx, gy, gw, gh,
             NULL, NULL, hInst, NULL
         );
         if (!g_hGraphWnd) return;
 
-        HWND hCombo = CreateWindowExA(
-            0, "COMBOBOX", NULL,
+        int tabH = MulDiv(30, dpi, 96);
+        int comboY = tabH + MulDiv(4, dpi, 96);
+        int btnW = MulDiv(110, dpi, 96);
+        int btnH = MulDiv(24, dpi, 96);
+
+        HWND hCombo = CreateWindowExW(
+            0, L"COMBOBOX", NULL,
             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            8, 32, 400, 200,
+            MulDiv(8, dpi, 96), comboY, gw - btnW - MulDiv(24, dpi, 96), MulDiv(200, dpi, 96),
             g_hGraphWnd, (HMENU)IDC_GRAPH_COMBO_ATTR, hInst, NULL
         );
         if (hCombo) {
-            SendMessageA(hCombo, WM_SETFONT, (WPARAM)g_hGraphFontSm, TRUE);
+            SendMessageW(hCombo, WM_SETFONT, (WPARAM)g_hGraphFontSm, TRUE);
             int a;
             for (a = 0; a < HISTORY_TRACKED_ATTRS; a++)
-                SendMessageA(hCombo, CB_ADDSTRING, 0, (LPARAM)g_HistoryAttrShortNames[a]);
-            SendMessageA(hCombo, CB_SETCURSEL, g_nGraphAttr, 0);
+                SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)Lang_GetHistoryTrackedAttrNameW(a));
+            SendMessageW(hCombo, CB_SETCURSEL, g_nGraphAttr, 0);
             ShowWindow(hCombo, (g_nGraphTab == GRAPH_TAB_ATTR) ? SW_SHOW : SW_HIDE);
         }
 
-        HWND hClear = CreateWindowExA(
-            0, "BUTTON", "Clear History",
+        HWND hClear = CreateWindowExW(
+            0, L"BUTTON", LStrW(STR_HIST_BTN_CLEAR),
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            412, 32, 90, 22,
+            gw - btnW - MulDiv(16, dpi, 96), comboY, btnW, btnH,
             g_hGraphWnd, (HMENU)IDC_GRAPH_BTN_CLEAR, hInst, NULL
         );
         if (hClear)
-            SendMessageA(hClear, WM_SETFONT, (WPARAM)g_hGraphFontSm, TRUE);
+            SendMessageW(hClear, WM_SETFONT, (WPARAM)g_hGraphFontSm, TRUE);
 
         if (nDriveIdx >= 0 && nDriveIdx < g_nDriveCount) {
-            char szTitle[128];
-            _snprintf(szTitle, sizeof(szTitle),
-                      "S.M.A.R.T. History > %s", g_Drives[nDriveIdx].szModel);
-            SetWindowTextA(g_hGraphWnd, szTitle);
+            wchar_t szTitle[256];
+            _snwprintf(szTitle, 256, L"%s > %s", LStrW(STR_HIST_TITLE), Utf8ToW(g_Drives[nDriveIdx].szModel));
+            SetWindowTextW(g_hGraphWnd, szTitle);
         }
     } else {
-
         if (nDriveIdx >= 0 && nDriveIdx < g_nDriveCount) {
-            char szTitle[128];
-            _snprintf(szTitle, sizeof(szTitle),
-                      "S.M.A.R.T. History > %s", g_Drives[nDriveIdx].szModel);
-            SetWindowTextA(g_hGraphWnd, szTitle);
+            wchar_t szTitle[256];
+            _snwprintf(szTitle, 256, L"%s > %s", LStrW(STR_HIST_TITLE), Utf8ToW(g_Drives[nDriveIdx].szModel));
+            SetWindowTextW(g_hGraphWnd, szTitle);
         }
         InvalidateRect(g_hGraphWnd, NULL, TRUE);
     }
@@ -674,8 +709,19 @@ void Graph_ShowWindow(HWND hParent, HINSTANCE hInst, int nDriveIdx)
 
 void Graph_Repaint(void)
 {
-    if (g_hGraphWnd && IsWindowVisible(g_hGraphWnd))
+    if (g_hGraphWnd && IsWindowVisible(g_hGraphWnd)) {
+        HWND hCombo = GetDlgItem(g_hGraphWnd, IDC_GRAPH_COMBO_ATTR);
+        if (hCombo) {
+            int curSel = (int)SendMessageW(hCombo, CB_GETCURSEL, 0, 0);
+            SendMessageW(hCombo, CB_RESETCONTENT, 0, 0);
+            int a;
+            for (a = 0; a < HISTORY_TRACKED_ATTRS; a++)
+                SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)Lang_GetHistoryTrackedAttrNameW(a));
+            SendMessageW(hCombo, CB_SETCURSEL, curSel >= 0 ? curSel : 0, 0);
+        }
+        SetDlgItemTextW(g_hGraphWnd, IDC_GRAPH_BTN_CLEAR, LStrW(STR_HIST_BTN_CLEAR));
         InvalidateRect(g_hGraphWnd, NULL, FALSE);
+    }
 }
 
 void Graph_DestroyAll(void)

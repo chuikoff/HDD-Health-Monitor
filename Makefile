@@ -28,7 +28,8 @@ SRCS    = $(SRCDIR)/main.cpp \
           $(SRCDIR)/mainwnd.cpp \
           $(SRCDIR)/smart.cpp \
           $(SRCDIR)/smart_history.cpp \
-          $(SRCDIR)/donate.cpp
+          $(SRCDIR)/donate.cpp \
+          $(SRCDIR)/lang.cpp
 
 OBJS    = $(patsubst $(SRCDIR)/%.cpp, $(OBJDIR)/%.o, $(SRCS))
 RES_O   = $(OBJDIR)/app_res.o
@@ -53,9 +54,10 @@ CFLAGS  = -mwindows -O2 \
 #                        the S.M.A.R.T. / SetupAPI code paths.
 LDFLAGS = -mwindows \
           -static -static-libgcc -static-libstdc++ \
-          -lcomctl32 -lmsimg32 -lshell32 \
+          -lcomctl32 -lmsimg32 -lshell32 -lcomdlg32 \
           -luser32 -lgdi32 -lkernel32 -ladvapi32 -lole32 -luuid \
           -lgdiplus -lshlwapi -lsetupapi -lcfgmgr32
+
 
 
 .PHONY: all clean

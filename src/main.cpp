@@ -70,7 +70,7 @@ static HANDLE CreateWorldMutex(void)
    a duplicate process. */
 static void BringExistingWindowToFront(void)
 {
-    HWND hExist = FindWindowA("LLHDMonitorMainWnd", NULL);
+    HWND hExist = FindWindowW(L"LLHDMonitorMainWnd", NULL);
     if (!hExist) return;
 
     if (!IsWindowVisible(hExist))
@@ -109,61 +109,65 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     icex.dwICC  = ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icex);
 
-    /* ---- GDI objects (brushes, fonts) ----------------------------- */
-    CreateGDIObjects();
+    /* ---- Multi-language initialization --------------------------- */
+    Lang_Init();
 
+    /* ---- Query System DPI & Initialize GDI objects --------------- */
+    HDC hdcScreen = GetDC(NULL);
+    if (hdcScreen) {
+        g_nDpi = GetDeviceCaps(hdcScreen, LOGPIXELSY);
+        ReleaseDC(NULL, hdcScreen);
+    }
+    if (g_nDpi <= 0) g_nDpi = 96;
+
+    CreateGDIObjects();
    
     Donate_Startup(NULL);
 
     /* ---- Register the main window class --------------------------- */
-    WNDCLASSEXA wc;
+    WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize        = sizeof(wc);
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = MainWndProc;
     wc.hInstance     = hInstance;
-    wc.hCursor       = LoadCursorA(NULL, IDC_ARROW);
+    wc.hCursor       = LoadCursorA(NULL, (LPCSTR)IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = "LLHDMonitorMainWnd";
+    wc.lpszClassName = L"LLHDMonitorMainWnd";
     wc.hIcon         = LoadIconA(hInstance, MAKEINTRESOURCEA(IDI_APPICON));
     wc.hIconSm       = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_APPICON),
                                           IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
 
-    if (!RegisterClassExA(&wc)) {
-        MessageBoxA(NULL, "RegisterClassEx failed!", "Error", MB_ICONERROR);
+    if (!RegisterClassExW(&wc)) {
+        MessageBoxW(NULL, L"RegisterClassEx failed!", L"Error", MB_ICONERROR);
         if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); }
         return 1;
     }
 
     /* ---- Center the main window on the primary monitor ------------ */
+    RECT rcWin = { 0, 0, WINDOW_W, WINDOW_H };
+    AdjustWindowRectEx(&rcWin, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
+    int realWinW = rcWin.right - rcWin.left;
+    int realWinH = rcWin.bottom - rcWin.top;
+
     int nScrW = GetSystemMetrics(SM_CXSCREEN);
     int nScrH = GetSystemMetrics(SM_CYSCREEN);
-    int nX    = (nScrW - WINDOW_W) / 2;
-    int nY    = (nScrH - WINDOW_H) / 2;
+    int nX    = (nScrW - realWinW) / 2;
+    int nY    = (nScrH - realWinH) / 2;
+    if (nX < 0) nX = 0;
+    if (nY < 0) nY = 0;
 
-    HMENU hMenuBar  = CreateMenu();
-    HMENU hMenuFile = CreatePopupMenu();
-    HMENU hMenuHelp = CreatePopupMenu();
-    AppendMenuA(hMenuFile, MF_STRING,    IDM_SHOW_WINDOW, "&Show Window");
-    AppendMenuA(hMenuFile, MF_SEPARATOR, 0,               NULL);
-    AppendMenuA(hMenuFile, MF_STRING,    IDM_EXIT,        "E&xit");
-    AppendMenuA(hMenuHelp, MF_STRING,    IDM_DONATE,      "&Donate...");
-    AppendMenuA(hMenuHelp, MF_SEPARATOR, 0,               NULL);
-    AppendMenuA(hMenuHelp, MF_STRING,    IDM_ABOUT,       "&About HDDHealth...");
-    AppendMenuA(hMenuBar,  MF_POPUP, (UINT_PTR)hMenuFile, "&File");
-    AppendMenuA(hMenuBar,  MF_POPUP, (UINT_PTR)hMenuHelp, "&Help");
-
-    HWND hWnd = CreateWindowExA(
+    HWND hWnd = CreateWindowExW(
         0,
-        "LLHDMonitorMainWnd",
-        "HDDHealth Monitor 1.1",
+        L"LLHDMonitorMainWnd",
+        LStrW(STR_APP_TITLE),
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        nX, nY, WINDOW_W, WINDOW_H,
-        NULL, hMenuBar, hInstance, NULL
+        nX, nY, realWinW, realWinH,
+        NULL, NULL, hInstance, NULL
     );
 
     if (!hWnd) {
-        MessageBoxA(NULL, "CreateWindow failed!", "Error", MB_ICONERROR);
+        MessageBoxW(NULL, L"CreateWindow failed!", L"Error", MB_ICONERROR);
         if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); }
         return 1;
     }
@@ -176,9 +180,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* ---- Standard Win32 message loop ------------------------------ */
     MSG msg;
     ZeroMemory(&msg, sizeof(msg));
-    while (GetMessageA(&msg, NULL, 0, 0)) {
+    while (GetMessageW(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
-        DispatchMessageA(&msg);
+        DispatchMessageW(&msg);
     }
 
     if (hMutex) {
