@@ -1,5 +1,5 @@
 # ============================================================================
-#  DriveMonitor - Build configuration
+#  HDDHealth Monitor - Build configuration
 #  ---------------------------------------------------------------------------
 #  100% Free and Open Source Software (FOSS).
 #
@@ -9,7 +9,7 @@
 #  License : MIT
 #
 #  Build targets:
-#    - $(OUTDIR)/DriveMonitor.exe : The monitor application itself.
+#    - $(OUTDIR)/HDDHealth.exe   : The monitor application itself.
 # ============================================================================
 
 ifeq ($(OS),Windows_NT)
@@ -23,10 +23,12 @@ endif
 SRCDIR  = src
 OBJDIR  = obj
 OUTDIR  = bin
-TARGET  = $(OUTDIR)/DriveMonitor.exe
+TARGET  = $(OUTDIR)/HDDHealthMonitor.exe
 SRCS    = $(SRCDIR)/main.cpp \
           $(SRCDIR)/mainwnd.cpp \
-          $(SRCDIR)/smart.cpp
+          $(SRCDIR)/smart.cpp \
+          $(SRCDIR)/smart_history.cpp \
+          $(SRCDIR)/donate.cpp
 
 OBJS    = $(patsubst $(SRCDIR)/%.cpp, $(OBJDIR)/%.o, $(SRCS))
 RES_O   = $(OBJDIR)/app_res.o
@@ -35,15 +37,14 @@ RES_O   = $(OBJDIR)/app_res.o
 #   -mwindows          : GUI subsystem (no console window)
 #   -O2                : Optimized release build
 #   -DWIN32 ...        : Win32 platform defines expected by the source
-#   -Wall              : Enable common warnings; unused-* only are suppressed
-#                        (format and C++ type issues are fixed in source).
-#   V=1                : Show full compiler/linker commands (default is quiet).
+#   -Wall ... -fpermissive : Reasonable warnings, with pragmatic suppressions
+#                          for the existing C-style Win32 code base.
 CFLAGS  = -mwindows -O2 \
           -DWIN32 -D_WIN32 -D_WINDOWS -DNDEBUG \
           -I$(SRCDIR) \
           -Wall -Wno-unused-function -Wno-unused-parameter \
-          -Wno-unused-variable \
-          -finput-charset=UTF-8
+          -Wno-unused-variable -Wno-format -Wno-cast-function-type \
+          -fpermissive
 
 # Linker flags:
 #   -static*           : Statically link the C/C++ runtime so the .exe
@@ -52,7 +53,7 @@ CFLAGS  = -mwindows -O2 \
 #                        the S.M.A.R.T. / SetupAPI code paths.
 LDFLAGS = -mwindows \
           -static -static-libgcc -static-libstdc++ \
-          -lcomctl32 -lcomdlg32 -lshell32 \
+          -lcomctl32 -lmsimg32 -lshell32 \
           -luser32 -lgdi32 -lkernel32 -ladvapi32 -lole32 -luuid \
           -lgdiplus -lshlwapi -lsetupapi -lcfgmgr32
 
@@ -65,26 +66,19 @@ all: $(OUTDIR) $(OBJDIR) $(TARGET)
 	@echo "  100% Free Open Source Software - have fun!"
 	@echo ""
 
-# V=1 prints full compiler/linker commands; default is quiet.
-ifeq ($(V),1)
-Q :=
-else
-Q := @
-endif
-
 $(OBJDIR)/%.o: $(SRCDIR)/%.cpp | $(OBJDIR)
 	@echo "  CC  $<"
-	$(Q)$(CC) $(CFLAGS) -c $< -o $@
+	@$(CC) $(CFLAGS) -c $< -o $@
 
 # Resource compilation: the .rc file references the .manifest and .ico,
 # so the .o depends on all three.
 $(RES_O): $(SRCDIR)/app.rc $(SRCDIR)/app.manifest $(SRCDIR)/app.ico | $(OBJDIR)
 	@echo "  RC  $(SRCDIR)/app.rc"
-	$(Q)$(WINDRES) --include-dir=$(SRCDIR) $(SRCDIR)/app.rc -o $(RES_O)
+	@$(WINDRES) --include-dir=$(SRCDIR) $(SRCDIR)/app.rc -o $(RES_O)
 
 $(TARGET): $(OBJS) $(RES_O) | $(OUTDIR)
 	@echo "  LD  $@"
-	$(Q)$(CC) $(OBJS) $(RES_O) $(LDFLAGS) -o $@
+	@$(CC) $(OBJS) $(RES_O) $(LDFLAGS) -o $@
 
 $(OBJDIR):
 ifeq ($(OS),Windows_NT)

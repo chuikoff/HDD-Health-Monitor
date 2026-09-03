@@ -29,26 +29,19 @@
 #endif
 
 #define WIN32_LEAN_AND_MEAN
-#ifndef UNICODE
-#define UNICODE
-#define _UNICODE
-#endif
 #include <windows.h>
 #include <shellapi.h>
 #include <commctrl.h>
-#include <stdio.h>
-#include <string.h>
 
 #include "mainwnd.h"
 #include "smart.h"
 #include "resource.h"
-#include "utf8ui.h"
-#include "safestr.h"
+#include "donate.h"    
 
 /* A globally-named mutex prevents the user from accidentally launching
    multiple instances of the monitor.  The "Global\" prefix makes the
    mutex visible across all terminal-server sessions. */
-#define MUTEX_NAME  "Global\\DriveMonitor_SingleInstance"
+#define MUTEX_NAME  "Global\\HDDHealth_SingleInstance_v1"
 
 /* ------------------------------------------------------------------ */
 /*  Single-instance helpers                                           */
@@ -97,46 +90,9 @@ static void BringExistingWindowToFront(void)
 /*  WinMain - program entry point                                     */
 /* ------------------------------------------------------------------ */
 
-/* Tiny crash log: no MessageBox (can deadlock in a crash). Writes
-   %TEMP%\DriveMonitor_crash.txt, else next to the exe. */
-static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep)
-{
-    char dir[MAX_PATH];
-    char path[MAX_PATH + 64];
-    FILE* f = NULL;
-    DWORD n = GetTempPathA(MAX_PATH, dir);
-    if (n && n < MAX_PATH) {
-        safe_snprintf(path, "%sDriveMonitor_crash.txt", dir);
-        f = fopen(path, "w");
-    }
-    if (!f && GetModuleFileNameA(NULL, dir, MAX_PATH)) {
-        char* slash = strrchr(dir, '\\');
-        if (!slash) slash = strrchr(dir, '/');
-        if (slash) {
-            slash[1] = '\0';
-            safe_snprintf(path, "%sDriveMonitor_crash.txt", dir);
-            f = fopen(path, "w");
-        }
-    }
-    if (f) {
-        DWORD code = 0;
-        void* addr = NULL;
-        if (ep && ep->ExceptionRecord) {
-            code = ep->ExceptionRecord->ExceptionCode;
-            addr = ep->ExceptionRecord->ExceptionAddress;
-        }
-        fprintf(f, "exception=0x%08lX\naddress=%p\nthread=%lu\n",
-                (unsigned long)code, addr, (unsigned long)GetCurrentThreadId());
-        fclose(f);
-    }
-    return EXCEPTION_EXECUTE_HANDLER;
-}
-
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow)
 {
-    SetUnhandledExceptionFilter(CrashFilter);
-
     /* ---- Single-instance guard ------------------------------------ */
     HANDLE hMutex = CreateWorldMutex();
     if (hMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -156,22 +112,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* ---- GDI objects (brushes, fonts) ----------------------------- */
     CreateGDIObjects();
 
+   
+    Donate_Startup(NULL);
+
     /* ---- Register the main window class --------------------------- */
-    WNDCLASSEXW wc;
+    WNDCLASSEXA wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize        = sizeof(wc);
     wc.style         = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc   = MainWndProc;
     wc.hInstance     = hInstance;
-    wc.hCursor       = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+    wc.hCursor       = LoadCursorA(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = L"LLHDMonitorMainWnd";
-    wc.hIcon         = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APPICON));
-    wc.hIconSm       = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APPICON),
+    wc.lpszClassName = "LLHDMonitorMainWnd";
+    wc.hIcon         = LoadIconA(hInstance, MAKEINTRESOURCEA(IDI_APPICON));
+    wc.hIconSm       = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(IDI_APPICON),
                                           IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
 
-    if (!RegisterClassExW(&wc)) {
-        MessageBoxU8(NULL, "RegisterClassEx failed!", "Error", MB_ICONERROR);
+    if (!RegisterClassExA(&wc)) {
+        MessageBoxA(NULL, "RegisterClassEx failed!", "Error", MB_ICONERROR);
         if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); }
         return 1;
     }
@@ -182,19 +141,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     int nX    = (nScrW - WINDOW_W) / 2;
     int nY    = (nScrH - WINDOW_H) / 2;
 
-    /* Menu is created in CreateMenuBar (WM_CREATE). Pass NULL here so
-     * CreateWindow does not attach a duplicate stub menu. */
-    HWND hWnd = CreateWindowExU8(
+    HMENU hMenuBar  = CreateMenu();
+    HMENU hMenuFile = CreatePopupMenu();
+    HMENU hMenuHelp = CreatePopupMenu();
+    AppendMenuA(hMenuFile, MF_STRING,    IDM_SHOW_WINDOW, "&Show Window");
+    AppendMenuA(hMenuFile, MF_SEPARATOR, 0,               NULL);
+    AppendMenuA(hMenuFile, MF_STRING,    IDM_EXIT,        "E&xit");
+    AppendMenuA(hMenuHelp, MF_STRING,    IDM_DONATE,      "&Donate...");
+    AppendMenuA(hMenuHelp, MF_SEPARATOR, 0,               NULL);
+    AppendMenuA(hMenuHelp, MF_STRING,    IDM_ABOUT,       "&About HDDHealth...");
+    AppendMenuA(hMenuBar,  MF_POPUP, (UINT_PTR)hMenuFile, "&File");
+    AppendMenuA(hMenuBar,  MF_POPUP, (UINT_PTR)hMenuHelp, "&Help");
+
+    HWND hWnd = CreateWindowExA(
         0,
         "LLHDMonitorMainWnd",
-        "DriveMonitor",
-        WS_OVERLAPPEDWINDOW,
+        "HDDHealth Monitor 1.1",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         nX, nY, WINDOW_W, WINDOW_H,
-        NULL, NULL, hInstance, NULL
+        NULL, hMenuBar, hInstance, NULL
     );
 
     if (!hWnd) {
-        MessageBoxU8(NULL, "CreateWindow failed!", "Error", MB_ICONERROR);
+        MessageBoxA(NULL, "CreateWindow failed!", "Error", MB_ICONERROR);
         if (hMutex) { ReleaseMutex(hMutex); CloseHandle(hMutex); }
         return 1;
     }
@@ -207,9 +176,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* ---- Standard Win32 message loop ------------------------------ */
     MSG msg;
     ZeroMemory(&msg, sizeof(msg));
-    while (GetMessage(&msg, NULL, 0, 0)) {
+    while (GetMessageA(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageA(&msg);
     }
 
     if (hMutex) {
