@@ -1,23 +1,35 @@
-# HDDHealth Monitor
+# DriveMonitor
+
+**Fork of [arisohandriputra/HDD-Health-Monitor](https://github.com/arisohandriputra/HDD-Health-Monitor)** — MIT License.
+
+DriveMonitor is a renamed fork of HDDHealth Monitor. MIT does not require a rename; this one uses the DriveMonitor product name. Original copyright: Ari Sohandri Putra / ARImetic Inc.
 
 **100% Free and Open Source Software (FOSS)**
 
-<img width="379" alt="image" src="https://github.com/user-attachments/assets/974c3d26-8544-43a2-957b-915e312c5bc6" />
-<img width="379" alt="Screenshot 2026-06-17 130619" src="https://github.com/user-attachments/assets/5e2d8ec2-0d8b-438c-aec3-5ef92378cc50" />
-
 ---
 
-**Support :**
-Windows 11/10/8.1/8/7/Vista
+**Support:** Windows 11/10/8.1/8/7/Vista
+
+## What this fork changes
+
+- Skips `IOCTL_STORAGE_PROTOCOL_COMMAND` on the default NVMe path (avoids `nvme.sys` BSOD `DRIVER_IRQL_NOT_LESS_OR_EQUAL`)
+- Russian UI (UTF-16), Victoria-style SMART table (ID / Параметр / Значение / Худший / Порог / RAW / Статус)
+- USB Realtek/JMicron/ASMedia: SAT first (SATA SSD), then one vendor passthrough (NVMe). No native NVMe IOCTL on USB
+- USB adapter name from VID/PID (e.g. Realtek 0BDA:9201), not the disk model
+- Unified SMART headline for every drive: **Запас · Износ · Записано** (missing values are —)
+- SMART is read once at start, on hotplug, and via **Перечитать**. No live monitoring, tray, graph, or surface test
+- Close on X quits the app. Window is resizable. Protocol shown (e.g. NVMe 1.2.1, SATA 6 Гбит/с)
+- Health is GOOD / CAUTION / BAD / UNKNOWN from an evidence matrix (not a Health% formula). Unknown vendor RAW is unscored, not Bad
+- Split confidence (completeness, transport, model, decoder, assess). Temperature bands; power-on hours are context, not a penalty
+- Vendor-aware SMART names/RAW (Seagate, WD, Samsung, Kingston/Phison, ADATA, Toshiba, Micron, Hynix, Intel)
+- No tray, no unused refresh timers, no glass chrome, no `IOCTL_STORAGE_PROTOCOL_COMMAND` in the tree
+- Needs administrator rights
 
 ## Author
 
-**Ari Sohandri Putra**
+Fork: **chuikoff** — https://boosty.to/chuikoff
 
-If you find this tool useful, please consider supporting the author via
-GitHub Sponsors:
-
-> https://github.com/sponsors/arisohandriputra/
+Upstream: **Ari Sohandri Putra** (ARImetic Inc.). MIT copyright stays in [LICENSE](./LICENSE).
 
 ## License
 
@@ -25,25 +37,13 @@ This project is released under the [MIT License](./LICENSE).
 
 ## What it does
 
-HDDHealth Monitor is a low-level Windows utility that reads raw
+DriveMonitor is a low-level Windows utility that reads raw
 S.M.A.R.T. data directly from physical drives via `DeviceIoControl` and
-presents it through a clean, modern GUI.  It supports:
+presents it through a GUI. It supports:
 
 - **ATA / SATA** drives via `IOCTL_ATA_PASS_THROUGH_DIRECT`
-- **USB** bridge chips (JMicron, ASMedia, Realtek, Cypress, ...) via
-  `IOCTL_SCSI_PASS_THROUGH_DIRECT` using SAT (SCSI-ATA-Translation)
-- **NVMe** drives via `IOCTL_STORAGE_QUERY_PROPERTY` on the native
-  Microsoft NVMe driver (reads Health Info Log 0x02)
-
-Features include:
-
-- Per-drive health percentage and performance metric
-- Full S.M.A.R.T. attribute table (ID, value, worst, raw, status)
-- Temperature / health / failure critical alerts via tray notifications
-- Hot-plug aware (USB drives detected on arrival)
-- Per-drive history graph (health % and individual attribute over time)
-- Save-screenshot feature (PNG via GDI+)
-- Multi-drive tray icons
+- **USB** bridges (Realtek RTL9210 SAT + 0xE4, JMicron, ASMedia, …) via `IOCTL_SCSI_PASS_THROUGH_DIRECT` / SAT
+- **Internal NVMe** via SCSI miniport / storage query — **not** `IOCTL_STORAGE_PROTOCOL_COMMAND`
 
 ## Building
 
@@ -58,41 +58,14 @@ Features include:
 make
 ```
 ```bash
-# Native Windows build (in a TDM-GCC)
-mingw32-make
+# Cross-compile from Linux
+make
 ```
 
-The output binary is placed at `bin/HDDHealth.exe`.
+The output binary is `bin/DriveMonitor.exe`.
 
 ### Clean
 
 ```bash
 make clean
 ```
-
-## Project structure
-
-```
-HDDHealth/
-├── LICENSE              # MIT License
-├── README.md            # This file
-├── Makefile             # Build configuration
-└── src/
-    ├── main.cpp         # WinMain entry point, single-instance guard
-    ├── mainwnd.h        # Main window declarations
-    ├── mainwnd.cpp      # Main window implementation + About dialog
-    ├── smart.h          # S.M.A.R.T. public interface
-    ├── smart.cpp        # Low-level S.M.A.R.T. acquisition (ATA/USB/NVMe)
-    ├── smart_history.h  # History & graph public interface
-    ├── smart_history.cpp# History persistence + graph window
-    ├── donate.h         # Donate module interface
-    ├── donate.cpp       # Donate dialog + GitHub Sponsors link
-    ├── resource.h       # Resource IDs
-    ├── app.rc           # Win32 resource script (icon + manifest + version)
-    ├── app.manifest     # Common-Controls v6 + requireAdministrator
-    ├── app.ico          # Application icon
-    └── mingw_compat.h   # MinGW SCSI/ATA header shims
-```
-
-
-Enjoy - and if it saves your data, consider sponsoring!
