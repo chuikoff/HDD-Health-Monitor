@@ -133,23 +133,6 @@ typedef enum _DRIVE_HEALTH_STATUS {
     HEALTH_STATUS_WARNING  = 4    /* SMART predictive failure returned */
 } DRIVE_HEALTH_STATUS;
 
-/* SSD-focused temperature bands (ATA + NVMe current composite temp). */
-typedef enum _TEMP_BAND {
-    TEMP_BAND_UNKNOWN  = 0,
-    TEMP_BAND_NORMAL   = 1,   /* 1-49 C: not a failure */
-    TEMP_BAND_ELEVATED = 2,   /* 50-59 C: show band, do not flip overall */
-    TEMP_BAND_HIGH     = 3,   /* 60-69 C: overall CAUTION via existing rule */
-    TEMP_BAND_CRITICAL = 4    /* >= 70 C */
-} TEMP_BAND;
-
-/* How useful normalized SMART Value/Worst/Threshold numbers are. */
-typedef enum _NORM_QUALITY {
-    NORM_QUALITY_UNKNOWN = 0,
-    NORM_QUALITY_LOW     = 1,
-    NORM_QUALITY_MEDIUM  = 2,
-    NORM_QUALITY_HIGH    = 3
-} NORM_QUALITY;
-
 /* ============================================================
  * Drive vendor identification
  * ============================================================ */
@@ -179,43 +162,6 @@ typedef enum _DRIVE_VENDOR {
 } DRIVE_VENDOR;
 
 /* ============================================================
- * Drive controller (MCU / SSD ASIC) — independent of brand
- * ============================================================ */
-typedef enum _DRIVE_CONTROLLER {
-    CONTROLLER_UNKNOWN  = 0,
-    CONTROLLER_PHISON   = 1,
-    CONTROLLER_SMI      = 2,   /* Silicon Motion */
-    CONTROLLER_SAMSUNG  = 3,
-    CONTROLLER_MARVELL  = 4,
-    CONTROLLER_INTEL    = 5,
-    CONTROLLER_MICRON   = 6,
-    CONTROLLER_HYNIX    = 7,
-    CONTROLLER_KIOXIA   = 8,
-    CONTROLLER_SANDISK  = 9,
-    CONTROLLER_REALTEK  = 10,
-    CONTROLLER_SEAGATE  = 11,
-    CONTROLLER_WD       = 12,
-    CONTROLLER_TOSHIBA  = 13,
-    CONTROLLER_HITACHI  = 14,
-    CONTROLLER_AMAZON   = 15,
-    CONTROLLER_MAXIO    = 16,  /* MAP1202/MAP1602 */
-    CONTROLLER_INNOGRIT = 17   /* IG5216/IG5236 */
-} DRIVE_CONTROLLER;
-
-/* ============================================================
- * NAND flash vendor — independent of brand and controller
- * ============================================================ */
-typedef enum _NAND_VENDOR {
-    NAND_UNKNOWN  = 0,
-    NAND_SAMSUNG  = 1,
-    NAND_MICRON   = 2,
-    NAND_KIOXIA   = 3,
-    NAND_HYNIX    = 4,
-    NAND_INTEL    = 5,
-    NAND_SANDISK  = 6
-} NAND_VENDOR;
-
-/* ============================================================
  * Drive types
  * ============================================================ */
 typedef enum _DRIVE_TYPE {
@@ -239,7 +185,7 @@ typedef enum _SMART_ACCESS_METHOD {
     SMART_ACCESS_SAT16             = 4,  /* SCSI 85h */
     SMART_ACCESS_STORAGE_QUERY     = 5,  /* IOCTL_STORAGE_QUERY_PROPERTY */
     SMART_ACCESS_NVME_PROTOCOL     = 6,  /* StorageDeviceProtocolSpecificProperty */
-    SMART_ACCESS_NVME_PASSTHROUGH  = 7   /* USB NVMe vendor SCSI (not PROTOCOL_COMMAND) */
+    SMART_ACCESS_NVME_PASSTHROUGH  = 7   /* IOCTL_STORAGE_PROTOCOL_COMMAND */
 } SMART_ACCESS_METHOD;
 
 #pragma pack(push, 1)
@@ -316,20 +262,12 @@ typedef struct _NVME_IDENTIFY_CONTROLLER {
     BYTE    Reserved232[224];
     BYTE    Subnqn[256];
     BYTE    Reserved768[3072];
-    BYTE    VS[256];          /* Vendor Specific (NVMe spec: 256 bytes at 3840) */
+    BYTE    VS[1024];         /* Vendor Specific */
 } NVME_IDENTIFY_CONTROLLER;
 
-/* Identify Controller is 4096 bytes. VS[1024] made this struct ~4790 bytes
- * so memcpy(sizeof) overread the 4096-byte SCSI DataBuf by ~768 bytes. */
-#ifdef __cplusplus
-static_assert(sizeof(NVME_IDENTIFY_CONTROLLER) <= 4096,
-    "NVME_IDENTIFY_CONTROLLER must fit in a 4096-byte Identify page");
-#endif
-
 /* ============================================================
- * Legacy ATA SMART structures (packed: 12 bytes per attr, ATA spec)
+ * Legacy ATA SMART structures
  * ============================================================ */
-#pragma pack(push, 1)
 typedef struct _SMART_ATTRIBUTE {
     BYTE  bAttrID;
     WORD  wStatusFlags;
@@ -354,15 +292,8 @@ typedef struct _SMART_ATTRIBUTE_DATA {
 typedef struct _SMART_THRESHOLD_DATA {
     WORD            wRevisionNumber;
     SMART_THRESHOLD stThresholds[30];
-    BYTE            bReserved[150];
+    BYTE            bReserved[149];
 } SMART_THRESHOLD_DATA;
-#pragma pack(pop)
-#ifdef __cplusplus
-static_assert(sizeof(SMART_ATTRIBUTE) == 12, "SMART_ATTRIBUTE must be 12 bytes");
-static_assert(sizeof(SMART_THRESHOLD) == 12, "SMART_THRESHOLD must be 12 bytes");
-static_assert(sizeof(SMART_ATTRIBUTE_DATA) == 512, "SMART_ATTRIBUTE_DATA must be 512 bytes");
-static_assert(sizeof(SMART_THRESHOLD_DATA) == 512, "SMART_THRESHOLD_DATA must be 512 bytes");
-#endif
 
 /* ============================================================
  * SMART Error Log structures (ATA8-ACS)
@@ -433,7 +364,6 @@ typedef struct _DRIVE_INFO {
     BOOL        bIsNVMe;
     int         nReadSpeedMBs;
     int         nWriteSpeedMBs;
-    char        szProtocol[32];  /* e.g. "NVMe 1.2.1", "SATA 6 Гбит/с", "USB" */
     SMART_ACCESS_METHOD eAccessMethod;
     DWORD       dwPowerOnHours;
     DWORD       dwPowerCycleCount;
@@ -450,6 +380,7 @@ typedef struct _DRIVE_INFO {
 
     /* Diagnostics: last GetLastError() per probe path */
     DWORD       dwErrNvmeProtocol;
+    DWORD       dwErrNvmePassthrough;
     DWORD       dwErrSat16;
     DWORD       dwErrSat12;
     DWORD       dwErrStorageProtocol;
@@ -457,29 +388,7 @@ typedef struct _DRIVE_INFO {
 
     /* ---- New fields  ---- */
     DRIVE_HEALTH_STATUS eHealthStatus;   /* Good / Caution / Bad */
-    int         nConfidence;          /* 0-100 overall weighted blend, 0 if no SMART */
-    int         nConfCompleteness;    /* SMART + thresh + temp + media counters */
-    int         nConfTransport;       /* native 100, USB SMART-ok 90, USB-no-SMART 40 */
-    int         nConfModelId;         /* controller known 99, firmware-family 90, unknown 70 */
-    int         nConfVendorDecoder;   /* 100 if 0 unknown attrs; else max(40, 100-10*nUnknown) */
-    int         nConfHealthAssess;    /* how well we can defend GOOD/CAUTION/BAD */
-    int         nEndurancePercent;    /* remaining life 0-100, -1 if N/A */
-    DRIVE_HEALTH_STATUS eReliability; /* media: realloc/pending/uncorrectable/NVMe media */
-    DRIVE_HEALTH_STATUS eInterface;   /* CRC / UDMA / link */
-    DRIVE_HEALTH_STATUS eTempStatus;  /* GOOD=normal, CAUTION=warm, BAD=hot (synced from eTempBand) */
-    TEMP_BAND   eTempBand;            /* SSD-focused temperature band */
-    NORM_QUALITY eNormQuality;        /* usefulness of Value/Worst/Threshold */
-    NORM_QUALITY eRawQuality;         /* usefulness of known media RAW counters */
-    int         nReallocated;         /* attr 05 RAW, -1 if attribute absent */
-    int         nPendingSectors;      /* attr C5 RAW, -1 if absent */
-    int         nUncorrectable;       /* attr C6 RAW, -1 if absent */
-    int         nRemapEvents;         /* attr C4 RAW, -1 if absent */
-    int         nCrcErrors;           /* attr C7 RAW, -1 if absent */
-    BOOL        bThresholdViolation;  /* any attr with thresh>0 and value<=thresh */
-    char        szEvidence[384];      /* one-line Russian evidence for UI */
-    DRIVE_VENDOR     eVendor;            /* Drive brand from model string */
-    DRIVE_CONTROLLER eController;        /* SSD ASIC / HDD MCU */
-    NAND_VENDOR      eNand;              /* NAND flash vendor, or UNKNOWN */
+    DRIVE_VENDOR eVendor;                /* Detected drive vendor */
 
     /* NVMe extended info */
     NVME_IDENTIFY_CONTROLLER nvmeIdent;
@@ -554,40 +463,10 @@ typedef struct _ATTR_NAME {
 
 extern const ATTR_NAME g_AttrNames[];
 
-/* Trusted RAW decoder vs. vendor-specific packing we refuse to score. */
-typedef enum _ATTR_DECODE_STATE {
-    ATTR_DECODE_KNOWN   = 0,   /* encoding trusted */
-    ATTR_DECODE_UNKNOWN = 1    /* no trusted RAW encoding */
-} ATTR_DECODE_STATE;
-
-typedef enum _RAW_ENC {
-    RAW_ENC_UNKNOWN = 0,
-    RAW_ENC_COUNTER32,
-    RAW_ENC_COUNTER48,
-    RAW_ENC_PERCENT,       /* value or raw as % */
-    RAW_ENC_TEMP_C,
-    RAW_ENC_HOURS,
-    RAW_ENC_LBA,
-    RAW_ENC_SECTORS_LO16,
-    RAW_ENC_EVENTS,
-    RAW_ENC_CYCLES
-} RAW_ENC;
-
-typedef struct _ATTR_DECODE {
-    const char*       szName;              /* display name */
-    RAW_ENC           eEnc;
-    ATTR_DECODE_STATE eState;              /* UNKNOWN iff eEnc==RAW_ENC_UNKNOWN */
-    int               nSemanticConfidence; /* 0-100 for the NAME, even if encoding unknown */
-    ATTR_CRITICALITY  eCrit;               /* only meaningful if KNOWN */
-} ATTR_DECODE;
-
-void GetAttrDecode(BYTE bID, const DRIVE_INFO* pInfo, ATTR_DECODE* out);
-
 /* ============================================================
  * Public API
  * ============================================================ */
 const char* GetAttrName(BYTE bID);
-const char* GetAttrNameEx(BYTE bID, const DRIVE_INFO* pInfo);
 ATTR_CRITICALITY GetAttrCriticality(BYTE bID);
 ATTR_INTERP GetAttrInterpretation(BYTE bID);
 BOOL        IsAttrCritical(BYTE bID);
@@ -595,10 +474,7 @@ const char* GetDriveTypeName(DRIVE_TYPE eType);
 const char* GetAccessMethodName(SMART_ACCESS_METHOD eMethod);
 const char* GetHealthStatusName(DRIVE_HEALTH_STATUS eStatus);
 const char* GetVendorName(DRIVE_VENDOR eVendor);
-const char* GetControllerName(DRIVE_CONTROLLER eController);
-const char* GetNandName(NAND_VENDOR eNand);
 DRIVE_VENDOR DetectDriveVendor(const char* szModel);
-void        IdentifyDriveParts(DRIVE_INFO* pInfo);
 
 BOOL  OpenDrive(int nDrive, HANDLE* phDrive);
 BOOL  OpenDriveReadOnly(int nDrive, HANDLE* phDrive);
@@ -646,16 +522,11 @@ BOOL  GetSMARTSelfTestLogSAT(HANDLE hDrive, DRIVE_INFO* pInfo);
 BOOL  GetNVMeIdentifyController(HANDLE hDrive, DRIVE_INFO* pInfo);
 BOOL  GetNVMeHealthLog(HANDLE hDrive, DRIVE_INFO* pInfo);
 BOOL  GetNVMeHealthLogFallback(HANDLE hDrive, DRIVE_INFO* pInfo);
+BOOL  GetNVMeHealthLogPassthrough(HANDLE hDrive, DRIVE_INFO* pInfo);
 BOOL  GetNVMeHealthLogEx(HANDLE hDrive, DRIVE_INFO* pInfo);
 
 /* Detection & calculation */
 DRIVE_TYPE DetectDriveType(HANDLE hDrive, DRIVE_INFO* pInfo);
-void  AssessDriveHealth(DRIVE_INFO* pInfo);
-/* UTF-8 Russian lecture for the health-state dialog. nBufLen should be >= 8192. */
-void  FormatHealthLecture(const DRIVE_INFO* pInfo, char* szBuf, int nBufLen);
-const char* GetTempBandName(TEMP_BAND eBand, BOOL bLowercase);
-void  FormatPowerOnHours(DWORD dwHours, char* szBuf, int nBufLen);
-BOOL  DriveTreatsC0AsPowerLoss(const DRIVE_INFO* pInfo);
 int   CalculateHealth(DRIVE_INFO* pInfo);
 int   CalculateHealthNVMe(DRIVE_INFO* pInfo);
 DRIVE_HEALTH_STATUS DetermineHealthStatus(DRIVE_INFO* pInfo);
@@ -664,25 +535,16 @@ int   CalculatePerformance(DRIVE_INFO* pInfo);
 /* SSD-specific analysis */
 void  ExtractSSDIndicators(DRIVE_INFO* pInfo);
 
-/* Aggregate scan.
- * ScanDrivesEx: bMeasureSpeed is ignored (always treated as FALSE).
- * Speed probes were removed — 4MB PhysicalDrive I/O crashed USB flash.
- * ScanDrives() never measures speed. */
+/* Aggregate scan */
 int   ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives);
-int   ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed);
-/* Refresh attributes / NVMe health only. Does NOT re-read SMART error log
- * or self-test log — those stay on the full ScanDrives path. */
 BOOL  RefreshDriveSmart(int nDriveIndex, DRIVE_INFO* pInfo);
-
-/* USB flash (UFD) heuristic: USB bus + flash-like product name, and not a
- * known NVMe/SATA enclosure bridge. Used to skip SAT/vendor SMART retries. */
-BOOL  UsbBridgeLooksLikeEnclosure(const DRIVE_INFO* p);
-BOOL  IsLikelyUsbFlashDrive(const DRIVE_INFO* pInfo);
 
 /* Utilities */
 void  FormatSize(DWORD dwMB, char* szBuf, int nBufLen);
-DWORD GetRawValue(const BYTE* pRaw);
-unsigned __int64 GetRawValue48(const BYTE* pRaw);
+DWORD GetRawValue(BYTE* pRaw);
+unsigned __int64 GetRawValue48(BYTE* pRaw);
+int   MeasureReadSpeed(int nDriveIndex);
+int   MeasureWriteSpeed(int nDriveIndex);
 
 #ifdef __cplusplus
 }
