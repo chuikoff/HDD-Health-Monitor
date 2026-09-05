@@ -130,7 +130,9 @@ typedef enum _DRIVE_HEALTH_STATUS {
     HEALTH_STATUS_GOOD     = 1,   /* All attributes within thresholds */
     HEALTH_STATUS_CAUTION  = 2,   /* One or more attributes near threshold or raw > 0 for critical */
     HEALTH_STATUS_BAD      = 3,   /* Attribute at or below threshold, or NVMe critical warning */
-    HEALTH_STATUS_WARNING  = 4    /* SMART predictive failure returned */
+    HEALTH_STATUS_WARNING  = 4,   /* SMART predictive failure — displays as ПЛОХО */
+    HEALTH_STATUS_OBSERVE  = 5,   /* Watch: risk factors, no confirmed media damage */
+    HEALTH_STATUS_CRITICAL = 6    /* Self-test failed / rapid deterioration */
 } DRIVE_HEALTH_STATUS;
 
 /* SSD-focused temperature bands (ATA + NVMe current composite temp). */
@@ -466,6 +468,17 @@ typedef struct _DRIVE_INFO {
     int         nEndurancePercent;    /* remaining life 0-100, -1 if N/A */
     DRIVE_HEALTH_STATUS eReliability; /* media: realloc/pending/uncorrectable/NVMe media */
     DRIVE_HEALTH_STATUS eInterface;   /* CRC / UDMA / link */
+    DRIVE_HEALTH_STATUS eMechanics;   /* HDD G-Sense / park; not a health percent */
+    DRIVE_HEALTH_STATUS eWear;        /* SSD endurance remaining; not a Health% */
+    int         nGSenseEvents;        /* attr BF/0E/DD RAW, -1 if absent */
+    int         nLoadUnload;          /* attr C1 RAW, -1 if absent */
+    int         nEmergencyRetract;    /* attr C0 RAW on HDD, -1 if absent */
+    int         nWriteErrorValue;     /* attr 200 current, -1 if absent */
+    int         nWriteErrorWorst;     /* attr 200 worst, -1 if absent */
+    int         nWriteErrorRaw;       /* attr 200 RAW 48-bit (capped), -1 if absent */
+    int         nGSenseDelta;         /* BF vs last sample, -1 if no prior sample */
+    int         nGSensePerKh;         /* events per 1000 power-on hours, -1 if none */
+    int         nMechRisk;            /* 0-100 if trend known, -1 otherwise */
     DRIVE_HEALTH_STATUS eTempStatus;  /* GOOD=normal, CAUTION=warm, BAD=hot (synced from eTempBand) */
     TEMP_BAND   eTempBand;            /* SSD-focused temperature band */
     NORM_QUALITY eNormQuality;        /* usefulness of Value/Worst/Threshold */
@@ -653,9 +666,12 @@ DRIVE_TYPE DetectDriveType(HANDLE hDrive, DRIVE_INFO* pInfo);
 void  AssessDriveHealth(DRIVE_INFO* pInfo);
 /* UTF-8 Russian lecture for the health-state dialog. nBufLen should be >= 8192. */
 void  FormatHealthLecture(const DRIVE_INFO* pInfo, char* szBuf, int nBufLen);
+void  FormatHealthLecturePlain(const DRIVE_INFO* pInfo, char* szBuf, int nBufLen);
+void  FormatHealthLectureExpert(const DRIVE_INFO* pInfo, char* szBuf, int nBufLen);
 const char* GetTempBandName(TEMP_BAND eBand, BOOL bLowercase);
 void  FormatPowerOnHours(DWORD dwHours, char* szBuf, int nBufLen);
 BOOL  DriveTreatsC0AsPowerLoss(const DRIVE_INFO* pInfo);
+BOOL  IsShockSensorAttr(BYTE bID);
 int   CalculateHealth(DRIVE_INFO* pInfo);
 int   CalculateHealthNVMe(DRIVE_INFO* pInfo);
 DRIVE_HEALTH_STATUS DetermineHealthStatus(DRIVE_INFO* pInfo);

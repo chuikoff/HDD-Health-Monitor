@@ -38,4 +38,9 @@
 #define IDC_NAND_LABEL          1033
 #define IDC_NAND_STATIC         1034
 
+/* Power-on hours (context, not a health penalty) */
+#define IDC_POH_LABEL            1036
+#define IDC_POH_STATIC           1037
+#define IDC_AXIS_STATIC          1038
+
 #endif

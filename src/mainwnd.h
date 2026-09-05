@@ -69,6 +69,8 @@
 #define CLR_TEXT_DIM    RGB(90, 100, 120)
 #define CLR_GREEN       RGB(30,  150, 60)
 #define CLR_YELLOW      RGB(180, 120, 0)
+#define CLR_ORANGE      RGB(220, 110, 20)
+#define CLR_CRITICAL    RGB(40,  40,  40)
 #define CLR_RED         RGB(190, 30,  30)
 #define CLR_ACCENT      RGB(30,  100, 210)
 #define CLR_HEADER      RGB(220, 230, 244)
