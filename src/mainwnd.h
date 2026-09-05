@@ -23,7 +23,9 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "smart.h"
+#include "lang.h"
 #define MAX_DRIVES 8
+#include "smart_history.h"
 #include "resource.h"
 #define IDC_DRIVE_LIST       1001
 #define IDC_HEALTH_STATIC    1002
@@ -49,25 +51,33 @@
 #define IDC_TEMP_LABEL         1022
 #define IDC_STATUS_LABEL       1023
 #define IDC_READ_SPEED_LABEL   1024
-#define IDC_REREAD_BTN         1026
+#define IDC_HISTORY_BTN_MAIN   1025
 #define IDC_DRIVE_BTN_BASE   1100
 #define IDM_ABOUT            2001
 #define IDM_EXIT             2002
 #define IDM_SHOW_WINDOW      2003
 #define IDM_SCREENSHOT       2004
+#define IDM_HISTORY          2005
 #define IDM_DONATE           2006
+#define IDM_SAVETEXT         2012
+#define IDM_LANG_ZH          2010
+#define IDM_LANG_EN          2011
 #define IDT_REFRESH          3001
 #define IDT_HOTPLUG          3002
 #define IDT_TITLE_UPDATE     3003
-#define REFRESH_INTERVAL_MS  30000
+#define REFRESH_INTERVAL_MS  5000
 #define WM_APP_REFRESH_DONE  (WM_APP + 1)
 #define WM_TRAYICON          (WM_USER + 1)
 #define IDI_TRAY             1
-#define DRIVE_BTN_H    68
-#define DRIVE_BTN_GAP   6
-#define DRIVE_BTN_PANEL_W 200
-#define WINDOW_W    920
-#define WINDOW_H    620
+
+extern int g_nDpi;
+#define SCALE_DPI(v) MulDiv((v), g_nDpi, 96)
+
+#define DRIVE_BTN_H          SCALE_DPI(68)
+#define DRIVE_BTN_GAP        SCALE_DPI(6)
+#define DRIVE_BTN_PANEL_W    SCALE_DPI(200)
+#define WINDOW_W             SCALE_DPI(780)
+#define WINDOW_H             SCALE_DPI(640)
 #define CLR_BG          RGB(240, 242, 247)
 #define CLR_PANEL       RGB(255, 255, 255)
 #define CLR_BORDER      RGB(180, 185, 200)
@@ -109,12 +119,13 @@ void    RepaintHealthBar(void);
 void    CreateControls(HWND hWnd);
 void    CreateGDIObjects(void);
 void    DestroyGDIObjects(void);
-void    RefreshData(HWND hWnd, BOOL bFull);
+void    RefreshData(HWND hWnd);
 void    UpdateDriveButtons(HWND hWnd);
 void    UpdateDriveInfo(HWND hWnd, int nDrive);
 void    UpdateAttrList(HWND hWnd, int nDrive);
 void    PaintMain(HWND hWnd, HDC hdc);
 void    ShowAboutDialog(HWND hWnd);
+void    UpdateUILanguage(HWND hWnd);
 COLORREF GetHealthColor(int nHealth);
 
 void    TrayIcon_Add(HWND hWnd);

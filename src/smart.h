@@ -225,52 +225,42 @@ typedef struct _NVME_HEALTH_INFO_LOG {
  * NVMe Identify Controller (partial - key fields)
  * ============================================================ */
 typedef struct _NVME_IDENTIFY_CONTROLLER {
-    BYTE    Reserved0[4];
-    BYTE    SerialNumber[20];
-    BYTE    ModelNumber[40];
-    BYTE    FirmwareRevision[8];
-    BYTE    RecommendedArbitrationBurst;
-    BYTE    Reserved73[3];
-    BYTE    OACS[2];           /* Optional Admin Command Support */
-    BYTE    ACL;               /* Abort Command Limit */
-    BYTE    AERL;              /* Asynchronous Event Request Limit */
-    BYTE    FRMW;              /* Firmware Updates */
-    BYTE    LPA;               /* Log Page Attributes */
-    BYTE    ELPE;              /* Error Log Page Entries */
-    BYTE    NPSS;              /* Number of Power States Support */
-    BYTE    AVSCC;             /* Admin Vendor Specific Command Configuration */
-    BYTE    APSTA;             /* Autonomous Power State Transition Attributes */
-    BYTE    WCTEMP[2];        /* Warning Composite Temperature Threshold */
-    BYTE    CCTEMP[2];        /* Critical Composite Temperature Threshold */
-    BYTE    Reserved100[80];
-    BYTE    Reserved180[16];
-    BYTE    SQES;              /* Submission Queue Entry Size */
-    BYTE    CQES;              /* Completion Queue Entry Size */
-    BYTE    Reserved198[2];
-    BYTE    NN[4];             /* Number of Namespaces */
-    BYTE    ONCS[2];          /* Optional NVM Command Support */
-    BYTE    FUSES[2];         /* Fused Operation Support */
-    BYTE    FNA;               /* Format NVM Attributes */
-    BYTE    VWC;               /* Volatile Write Cache */
-    BYTE    AWUN[2];          /* Atomic Write Unit Normal */
-    BYTE    AWUPF[2];         /* Atomic Write Unit Power Fail */
-    BYTE    NVSCC;             /* NVM Vendor Specific Command Configuration */
-    BYTE    Reserved223;
-    BYTE    ACWU[2];          /* Atomic Compare & Write Unit */
-    BYTE    Reserved226[2];
-    BYTE    SGLS[4];          /* SGL Support */
-    BYTE    Reserved232[224];
-    BYTE    Subnqn[256];
-    BYTE    Reserved768[3072];
-    BYTE    VS[256];          /* Vendor Specific (NVMe spec: 256 bytes at 3840) */
+    BYTE    Reserved0[4];       /* 0..3: VID (2), SSVID (2) */
+    BYTE    SerialNumber[20];   /* 4..23: Serial Number */
+    BYTE    ModelNumber[40];    /* 24..63: Model Number */
+    BYTE    FirmwareRevision[8];/* 64..71: Firmware Revision */
+    BYTE    RecommendedArbitrationBurst; /* 72 */
+    BYTE    Reserved73[59];     /* 73..131: IEEE, CMIC, MDTS, CNTLID, VER, etc. */
+    BYTE    WCTEMP[2];          /* 132..133: Warning Composite Temperature Threshold */
+    BYTE    CCTEMP[2];          /* 134..135: Critical Composite Temperature Threshold */
+    BYTE    Reserved136[120];   /* 136..255 */
+    BYTE    OACS[2];            /* 256..257: Optional Admin Command Support */
+    BYTE    ACL;                /* 258: Abort Command Limit */
+    BYTE    AERL;               /* 259: Asynchronous Event Request Limit */
+    BYTE    FRMW;               /* 260: Firmware Updates */
+    BYTE    LPA;                /* 261: Log Page Attributes */
+    BYTE    ELPE;               /* 262: Error Log Page Entries */
+    BYTE    NPSS;               /* 263: Number of Power States Support */
+    BYTE    AVSCC;              /* 264: Admin Vendor Specific Command Configuration */
+    BYTE    APSTA;              /* 265: Autonomous Power State Transition Attributes */
+    BYTE    Reserved266[246];   /* 266..511 */
+    BYTE    NN[4];              /* 512..515: Number of Namespaces */
+    BYTE    ONCS[2];            /* 516..517: Optional NVM Command Support */
+    BYTE    FUSES[2];           /* 518..519: Fused Operation Support */
+    BYTE    FNA;                /* 520: Format NVM Attributes */
+    BYTE    VWC;                /* 521: Volatile Write Cache */
+    BYTE    AWUN[2];            /* 522..523: Atomic Write Unit Normal */
+    BYTE    AWUPF[2];           /* 524..525: Atomic Write Unit Power Fail */
+    BYTE    NVSCC;              /* 526: NVM Vendor Specific Command Configuration */
+    BYTE    Reserved527;        /* 527 */
+    BYTE    ACWU[2];            /* 528..529: Atomic Compare & Write Unit */
+    BYTE    Reserved530[2];     /* 530..531 */
+    BYTE    SGLS[4];            /* 532..535: SGL Support */
+    BYTE    Reserved536[232];   /* 536..767 */
+    BYTE    Subnqn[256];        /* 768..1023: Subsystem NQN */
+    BYTE    Reserved1024[2048]; /* 1024..3071 */
+    BYTE    VS[1024];           /* 3072..4095: Vendor Specific */
 } NVME_IDENTIFY_CONTROLLER;
-
-/* Identify Controller is 4096 bytes. VS[1024] made this struct ~4790 bytes
- * so memcpy(sizeof) overread the 4096-byte SCSI DataBuf by ~768 bytes. */
-#ifdef __cplusplus
-static_assert(sizeof(NVME_IDENTIFY_CONTROLLER) <= 4096,
-    "NVME_IDENTIFY_CONTROLLER must fit in a 4096-byte Identify page");
-#endif
 
 /* ============================================================
  * Legacy ATA SMART structures
@@ -371,7 +361,6 @@ typedef struct _DRIVE_INFO {
     BOOL        bIsNVMe;
     int         nReadSpeedMBs;
     int         nWriteSpeedMBs;
-    char        szProtocol[32];  /* e.g. "NVMe 1.2.1", "SATA 6 Гбит/с", "USB" */
     SMART_ACCESS_METHOD eAccessMethod;
     DWORD       dwPowerOnHours;
     DWORD       dwPowerCycleCount;
@@ -543,20 +532,9 @@ int   CalculatePerformance(DRIVE_INFO* pInfo);
 /* SSD-specific analysis */
 void  ExtractSSDIndicators(DRIVE_INFO* pInfo);
 
-/* Aggregate scan.
- * ScanDrivesEx: bMeasureSpeed is ignored (always treated as FALSE).
- * MeasureReadSpeed/MeasureWriteSpeed are stubs that return -1 — 4MB
- * PhysicalDrive probes crashed USB flash on refresh.
- * ScanDrives() never measures speed. */
+/* Aggregate scan */
 int   ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives);
-int   ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed);
-/* Refresh attributes / NVMe health only. Does NOT re-read SMART error log
- * or self-test log — those stay on the full ScanDrives path. */
 BOOL  RefreshDriveSmart(int nDriveIndex, DRIVE_INFO* pInfo);
-
-/* USB flash (UFD) heuristic: USB bus + flash-like product name, and not a
- * known NVMe/SATA enclosure bridge. Used to skip SAT/vendor SMART retries. */
-BOOL  IsLikelyUsbFlashDrive(const DRIVE_INFO* pInfo);
 
 /* Utilities */
 void  FormatSize(DWORD dwMB, char* szBuf, int nBufLen);
