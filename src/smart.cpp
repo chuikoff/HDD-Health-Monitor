@@ -1,30 +1,6 @@
-/* ============================================================================
- *  HDDHealth Monitor - S.M.A.R.T. data acquisition core
- *  ---------------------------------------------------------------------------
- *  100% Free and Open Source Software (FOSS).
- *
- *  Author  : Ari Sohandri Putra
- *  Company : ARImetic Inc.
- *  Sponsor : https://github.com/sponsors/arisohandriputra/
- *  License : MIT
- *
- *  This translation unit contains the low-level drive enumeration and
- *  S.M.A.R.T. attribute parsing logic.  It supports three transport
- *  families:
- *    1. ATA / SATA  - via IOCTL_ATA_PASS_THROUGH_DIRECT (IDENTIFY,
- *                     SMART_READ_DATA, SMART_READ_THRESHOLDS).
- *    2. USB bridge  - via IOCTL_SCSI_PASS_THROUGH_DIRECT using the
- *                     SAT (SCSI-ATA-Translation) protocol; tested with
- *                     JMicron, ASMedia, Realtek and Cypress bridges.
- *    3. NVMe        - via IOCTL_STORAGE_QUERY_PROPERTY on the native
- *                     Microsoft NVMe driver; reads Health Info Log 0x02
- *                     and translates the key SMART-equivalent fields.
- *
- *  The public entry point is ScanDrives() which fills a caller-allocated
- *  DRIVE_INFO[] array with model, serial, firmware, size, temperature,
- *  health %, performance metrics, and the normalized attribute table.
- * ============================================================================
- */
+/* DriveMonitor - SMART acquisition (ATA / USB SAT / NVMe query).
+ * Fork of HDDHealth Monitor, MIT: see LICENSE.
+ * Never IOCTL_STORAGE_PROTOCOL_COMMAND — nvme.sys bugchecks on it. */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -305,8 +281,8 @@ static void CopyNvmeIdentBuf(DRIVE_INFO* pInfo, const BYTE* pBuf, DWORD nAvail)
 
 /* Realtek RTL9210 USB dual-mode enclosure (NVMe via 0xE4, SATA via SAT).
  * Native NvmeMini IOCTL on this USB handle crashes the process.
- * ScanDrivesEx: SAT SMART first, then one-shot vendor 0xE4.
- * Never 0xE4 / NvmeMini from RefreshDriveSmart or NVMeOverUSBTryAll. */
+ * ScanDrives: SAT SMART first, then one-shot vendor 0xE4.
+ * Never 0xE4 / NvmeMini from NVMeOverUSBTryAll. */
 static BOOL IsRealtekNvmeUsbBridge(const DRIVE_INFO* p)
 {
     char hay[384];
@@ -570,7 +546,7 @@ static BOOL IsBufferAllFF(const BYTE* p, int nLen)
  * ============================================================ */
 static const char* VendorSpecificAttrName(BYTE bID);
 
-const ATTR_NAME g_AttrNames[] = {
+static const ATTR_NAME g_AttrNames[] = {
     /* ---- Standard ATA SMART attributes ---- */
     { 0x01, "Частота ошибок чтения",             ATTR_CRIT_ADVISORY,  INTERP_RATE         },
     { 0x02, "Производительность",                ATTR_CRIT_NONE,      INTERP_NORMAL       },
@@ -722,16 +698,6 @@ const ATTR_NAME g_AttrNames[] = {
     /* Terminator */
     { 0x00, NULL,                                ATTR_CRIT_NONE,      INTERP_NORMAL       }
 };
-
-const char* GetAttrName(BYTE bID)
-{
-    int i = 0;
-    while (g_AttrNames[i].szName != NULL) {
-        if (g_AttrNames[i].bID == bID) return g_AttrNames[i].szName;
-        i++;
-    }
-    return VendorSpecificAttrName(bID);
-}
 
 /* Vendor overlay: only IDs whose name differs from generic g_AttrNames.
  * Terminated by id 0. HGST/Hitachi share WD names (generic already matches).
@@ -1199,31 +1165,6 @@ const char* GetAttrNameEx(BYTE bID, const DRIVE_INFO* pInfo)
     return d.szName ? d.szName : VendorSpecificAttrName(bID);
 }
 
-ATTR_CRITICALITY GetAttrCriticality(BYTE bID)
-{
-    int i = 0;
-    while (g_AttrNames[i].szName != NULL) {
-        if (g_AttrNames[i].bID == bID) return g_AttrNames[i].eCritLevel;
-        i++;
-    }
-    return ATTR_CRIT_NONE;
-}
-
-ATTR_INTERP GetAttrInterpretation(BYTE bID)
-{
-    int i = 0;
-    while (g_AttrNames[i].szName != NULL) {
-        if (g_AttrNames[i].bID == bID) return g_AttrNames[i].eInterp;
-        i++;
-    }
-    return INTERP_NORMAL;
-}
-
-BOOL IsAttrCritical(BYTE bID)
-{
-    return (GetAttrCriticality(bID) >= ATTR_CRIT_CRITICAL);
-}
-
 const char* GetDriveTypeName(DRIVE_TYPE eType)
 {
     switch (eType) {
@@ -1236,20 +1177,6 @@ const char* GetDriveTypeName(DRIVE_TYPE eType)
     case DRIVE_TYPE_SD:       return "SD";
     case DRIVE_TYPE_SCSI:     return "SAS";
     default:                  return "Неизвестно";
-    }
-}
-
-const char* GetAccessMethodName(SMART_ACCESS_METHOD eMethod)
-{
-    switch (eMethod) {
-    case SMART_ACCESS_LEGACY_IOCTL:     return "Legacy IOCTL";
-    case SMART_ACCESS_ATA_PASSTHROUGH:  return "ATA Pass-Through";
-    case SMART_ACCESS_SAT12:            return "SAT-12 (SCSI A1h)";
-    case SMART_ACCESS_SAT16:            return "SAT-16 (SCSI 85h)";
-    case SMART_ACCESS_STORAGE_QUERY:    return "Storage Query";
-    case SMART_ACCESS_NVME_PROTOCOL:    return "NVMe Protocol Query";
-    case SMART_ACCESS_NVME_PASSTHROUGH: return "NVMe Pass-Through";
-    default:                            return "None";
     }
 }
 
@@ -2309,11 +2236,6 @@ BOOL GetIdentifyData(HANDLE hDrive, int nDrive, DRIVE_INFO* pInfo)
 
     /* Word 76/77: SATA gen / negotiated speed → szProtocol */
     FillAtaProtocolFromIdent(pInfo, pIdent);
-
-    /* Word 88: Ultra DMA mode support 
-     * for performance calculation — current vs max UDMA mode)
-     * Bits 0-7 = supported modes, Bits 8-15 = selected mode */
-    /* (We store this for potential use by CalculatePerformance) */
 
     return TRUE;
 }
@@ -5362,105 +5284,6 @@ if (pInfo->nEndurancePercent >= 0) {
     }
 }
 
-int CalculateHealthNVMe(DRIVE_INFO* pInfo)
-{
-    AssessDriveHealth(pInfo);
-    return pInfo ? pInfo->nHealthPercent : -1;
-}
-
-int CalculateHealth(DRIVE_INFO* pInfo)
-{
-    AssessDriveHealth(pInfo);
-    return pInfo ? pInfo->nHealthPercent : -1;
-}
-
-DRIVE_HEALTH_STATUS DetermineHealthStatus(DRIVE_INFO* pInfo)
-{
-    if (!pInfo) return HEALTH_STATUS_UNKNOWN;
-    AssessDriveHealth(pInfo);
-    return pInfo->eHealthStatus;
-}
-
-int CalculatePerformance(DRIVE_INFO* pInfo)
-{
-    if (pInfo->bIsUSB && !pInfo->bSMART_Supported)
-        return -1;
-
-    int i, j;
-
-
-    int nCRCPerf = 100;
-    for (i = 0; i < 30; i++) {
-        SMART_ATTRIBUTE* pAttr = &pInfo->attrData.stAttributes[i];
-        if (pAttr->bAttrID != 0xC7) continue;
-        DWORD dwCRC = GetRawValue(pAttr->bRawValue);
-        if      (dwCRC == 0)   nCRCPerf = 100;
-        else if (dwCRC < 10)   nCRCPerf = 75;
-        else                   nCRCPerf = 50;
-        break;
-    }
-
-
-    if (pInfo->bIsNVMe || pInfo->eType == DRIVE_TYPE_SSD_SATA || pInfo->eType == DRIVE_TYPE_M2_SATA) {
-        int nPerf = (nCRCPerf * 25 + 100 * 75) / 100;
-        if (nPerf < 0)   nPerf = 0;
-        if (nPerf > 100) nPerf = 100;
-        return nPerf;
-    }
-
-
-    static const BYTE sPerfIDs[] = { 0x07, 0x08, 0x02, 0x00 };
-    int nPerfSum = 0, nPerfCount = 0;
-    for (i = 0; sPerfIDs[i] != 0; i++) {
-        BYTE bTargetID = sPerfIDs[i];
-        for (j = 0; j < 30; j++) {
-            SMART_ATTRIBUTE* pAttr = &pInfo->attrData.stAttributes[j];
-            if (pAttr->bAttrID != bTargetID) continue;
-            BYTE bThresh = 0;
-            int k;
-            for (k = 0; k < 30; k++) {
-                if (pInfo->threshData.stThresholds[k].bAttrID == bTargetID) {
-                    bThresh = pInfo->threshData.stThresholds[k].bThresholdValue;
-                    break;
-                }
-            }
-            int nVal = (int)pAttr->bAttrValue;
-            if (bThresh > 0 && nVal > bThresh) {
-
-                int nRange = 100 - (int)bThresh;
-                int nAttrPerf = (nRange > 0)
-                    ? ((nVal - (int)bThresh) * 100 / nRange)
-                    : 100;
-                if (nAttrPerf > 100) nAttrPerf = 100;
-                nPerfSum += nAttrPerf;
-            } else if (bThresh == 0 && nVal > 0) {
-
-                nPerfSum += 100;
-            } else {
-                nPerfSum += 0;
-            }
-            nPerfCount++;
-            break;
-        }
-    }
-
-    int nSmartPerf = (nPerfCount > 0) ? (nPerfSum / nPerfCount) : 100;
-
-
-    int nDMAPerf = 100;
-
-    if (nCRCPerf <= 50)
-        nDMAPerf = 60;
-    else if (nCRCPerf <= 75)
-        nDMAPerf = 80;
-
-
-    int nPerf = (nSmartPerf * 25 + nDMAPerf * 50 + nCRCPerf * 25) / 100;
-    if (nPerf < 0)   nPerf = 0;
-    if (nPerf > 100) nPerf = 100;
-    return nPerf;
-}
-
 /* ============================================================
  * SSD-specific indicator extraction
  * Extracts vendor-specific SSD health info
@@ -6477,7 +6300,7 @@ static BOOL NVMeOverUSBTryAll(HANDLE hDrive, DRIVE_INFO* pInfo)
 {
     /* Try known NVMe-over-USB bridge protocols. Never shotgun JMicron /
      * ASMedia / VLI / native NvmeMini / 0xE4 at a known Realtek RTL9210.
-     * Realtek 0xE4 is a one-shot in ScanDrivesEx only. */
+     * Realtek 0xE4 is a one-shot in ScanDrives only. */
 
     if (IsRealtekNvmeUsbBridge(pInfo))
         return FALSE;
@@ -6496,7 +6319,7 @@ static BOOL NVMeOverUSBTryAll(HANDLE hDrive, DRIVE_INFO* pInfo)
         }
     }
 
-    /* 3. Realtek RTL9210 — 0xE4 only from ScanDrivesEx, never here. */
+    /* 3. Realtek RTL9210 — 0xE4 only from ScanDrives, never here. */
 
     /* 4. VLI VL716/VL717 */
     if (NVMeIdentifyVLI(hDrive, pInfo)) {
@@ -6516,35 +6339,6 @@ static BOOL NVMeOverUSBTryAll(HANDLE hDrive, DRIVE_INFO* pInfo)
 
     return FALSE;
 }
-BOOL RefreshDriveSmart(int nDriveIndex, DRIVE_INFO* pInfo)
-{
-    HANDLE hDrive;
-    if (!pInfo) return FALSE;
-    if (IsLikelyUsbFlashDrive(pInfo)) return FALSE;
-    /* USB (incl. Realtek RTL9210): never IOCTL on the 30s timer.
-     * Keep the last full-scan snapshot. Native NvmeMini / vendor 0xE4
-     * on a USB handle crashes the process. */
-    if (pInfo->bIsUSB) return FALSE;
-    if (!OpenDrive(nDriveIndex, &hDrive)) return FALSE;
-
-    if (pInfo->bIsNVMe) {
-        /* Native NVMe only. Do not shotgun NVMeOverUSBTryAll here. */
-        GetNVMeHealthLogEx(hDrive, pInfo);
-        ExtractNVMeExtendedInfo(pInfo);
-        pInfo->nHealthPercent = pInfo->bSMART_Supported
-            ? CalculateHealthNVMe(pInfo) : -1;
-    } else if (pInfo->bSMART_Supported) {
-        AcquireATASMART(hDrive, nDriveIndex, pInfo, FALSE);
-        pInfo->nHealthPercent = CalculateHealth(pInfo);
-    }
-    pInfo->nPerformancePercent = CalculatePerformance(pInfo);
-    pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
-    IdentifyDriveParts(pInfo);
-
-    CloseHandle(hDrive);
-    return TRUE;
-}
-
 
 /* Heuristic: consumer USB flash almost never exposes SMART. Known HDD/SSD
  * enclosure bridges (RTL9210, JMicron, ASMedia, Realtek NVMe, …) are NOT flash. */
@@ -6613,18 +6407,9 @@ BOOL IsLikelyUsbFlashDrive(const DRIVE_INFO* p)
 
 int ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives)
 {
-    return ScanDrivesEx(pDrives, nMaxDrives, FALSE);
-}
-
-int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
-{
     int nFound = 0;
     int nDrive;
     const int nScanLimit = 32;
-
-    /* Never probe 4MB PhysicalDrive read/write — USB flash AVs/hangs. */
-    (void)bMeasureSpeed;
-    bMeasureSpeed = FALSE;
 
     for (nDrive = 0; nDrive < nScanLimit && nFound < nMaxDrives; nDrive++) {
         HANDLE hDrive;
@@ -6650,8 +6435,6 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
         pInfo->eRawQuality    = NORM_QUALITY_UNKNOWN;
         pInfo->bThresholdViolation = FALSE;
         pInfo->szEvidence[0]  = '\0';
-        pInfo->nReadSpeedMBs  = -1;
-        pInfo->nWriteSpeedMBs = -1;
         pInfo->eType          = DRIVE_TYPE_UNKNOWN;
         pInfo->eAccessMethod  = SMART_ACCESS_NONE;
         pInfo->eHealthStatus  = HEALTH_STATUS_UNKNOWN;
@@ -6678,12 +6461,9 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
             if (pInfo->szModel[0] == '\0') GetDeviceDescriptor(hDrive, pInfo);
             if (pInfo->dwCapacityMB == 0)  GetCapacityFromGeometry(hDrive, pInfo);
 
-            pInfo->nHealthPercent      = pInfo->bSMART_Supported
-                                         ? CalculateHealthNVMe(pInfo) : -1;
-            pInfo->nPerformancePercent = CalculatePerformance(pInfo);
             pInfo->eType               = DRIVE_TYPE_NVME;
             pInfo->bIsNVMe             = TRUE;
-            pInfo->eHealthStatus       = DetermineHealthStatus(pInfo);
+            AssessDriveHealth(pInfo);
             IdentifyDriveParts(pInfo);
             FillDriveProtocol(pInfo);
 
@@ -6803,8 +6583,8 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
                 /* RTL9210B dual-mode (SATA via SAT, NVMe via 0xE4).
                  * SAT first: this enclosure often holds a SATA SSD;
                  * 0xE4 on SATA is useless. One-shot 0xE4 only if SAT
-                 * SMART failed. Stay USB so RefreshDriveSmart never
-                 * native-IOCTLs it. Do NOT TryAll, GetNVMeHealthLogEx,
+                 * SMART failed. Stay USB: no native NVMe IOCTL on this
+                 * handle. Do NOT TryAll, GetNVMeHealthLogEx,
                  * or IOCTL_STORAGE_PROTOCOL_COMMAND. */
                 BOOL got = FALSE;
 
@@ -6818,8 +6598,6 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
                     pInfo->bIsNVMe = FALSE;
                     pInfo->bIsUSB = TRUE;
                     pInfo->eType = DetectDriveType(hDrive, pInfo);
-                    pInfo->nHealthPercent = CalculateHealth(pInfo);
-                    pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
                     /* ExtractTemperature/counters/SSD indicators:
                      * already inside AcquireATASMART. */
                 }
@@ -6833,8 +6611,6 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
                         pInfo->bIsUSB = TRUE;
                         pInfo->eType = DRIVE_TYPE_NVME;
                         pInfo->bSMART_Supported = TRUE;
-                        pInfo->nHealthPercent = CalculateHealthNVMe(pInfo);
-                        pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
                         got = TRUE;
                     }
                 }
@@ -6849,7 +6625,7 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
                 /* JMS583/586 dual-mode (SATA via SAT, NVMe via vendor).
                  * SAT first like RTL9210: enclosure may hold a SATA SSD.
                  * One-shot JMicron identify+health only if SAT SMART failed.
-                 * Stay USB so RefreshDriveSmart never native-IOCTLs it.
+                 * Stay USB: no native NVMe IOCTL on this handle.
                  * Do NOT TryAll, GetNVMeHealthLogEx, or NvmeMini. */
                 BOOL got = FALSE;
 
@@ -6860,8 +6636,6 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
                     pInfo->bIsNVMe = FALSE;
                     pInfo->bIsUSB = TRUE;
                     pInfo->eType = DetectDriveType(hDrive, pInfo);
-                    pInfo->nHealthPercent = CalculateHealth(pInfo);
-                    pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
                 }
 
                 if (!got) {
@@ -6872,8 +6646,6 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
                         pInfo->bIsUSB = TRUE;
                         pInfo->eType = DRIVE_TYPE_NVME;
                         pInfo->bSMART_Supported = TRUE;
-                        pInfo->nHealthPercent = CalculateHealthNVMe(pInfo);
-                        pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
                         got = TRUE;
                     }
                 }
@@ -6898,8 +6670,6 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
                     pInfo->bIsNVMe = FALSE;
                     pInfo->bIsUSB = TRUE;
                     pInfo->eType = DetectDriveType(hDrive, pInfo);
-                    pInfo->nHealthPercent = CalculateHealth(pInfo);
-                    pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
                 }
 
                 if (!got) {
@@ -6910,8 +6680,6 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
                         pInfo->bIsUSB = TRUE;
                         pInfo->eType = DRIVE_TYPE_NVME;
                         pInfo->bSMART_Supported = TRUE;
-                        pInfo->nHealthPercent = CalculateHealthNVMe(pInfo);
-                        pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
                         got = TRUE;
                     }
                 }
@@ -6997,14 +6765,7 @@ int ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed)
             AcquireATASMART(hDrive, nDrive, pInfo, TRUE);
         }
 
-        if (pInfo->bIsNVMe) {
-            pInfo->nHealthPercent = pInfo->bSMART_Supported
-                                   ? CalculateHealthNVMe(pInfo) : -1;
-        } else {
-            pInfo->nHealthPercent = CalculateHealth(pInfo);
-        }
-        pInfo->nPerformancePercent = CalculatePerformance(pInfo);
-        pInfo->eHealthStatus = DetermineHealthStatus(pInfo);
+        AssessDriveHealth(pInfo);
         IdentifyDriveParts(pInfo);
         FillDriveProtocol(pInfo);
 

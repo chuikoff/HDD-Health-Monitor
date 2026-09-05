@@ -1,23 +1,4 @@
-/* ============================================================================
- *  HDDHealth Monitor - Main window implementation
- *  ---------------------------------------------------------------------------
- *  100% Free and Open Source Software (FOSS).
- *
- *  Author  : Ari Sohandri Putra
- *  Company : ARImetic Inc.
- *  Sponsor : https://github.com/sponsors/arisohandriputra/
- *  License : MIT
- *
- *  This translation unit implements the entire main-window experience:
- *    - Drive-selection buttons (custom owner-drawn buttons)
- *    - Health custom progress bar
- *    - S.M.A.R.T. attribute list view
- *    - Device arrival / removal (hot-plug) handling
- *    - About dialog
- *    - Save-screenshot feature (PNG via GDI+)
- *
- * ============================================================================
- */
+/* DriveMonitor - main window. Fork of HDDHealth Monitor, MIT: see LICENSE. */
 
 #define WIN32_LEAN_AND_MEAN
 #ifndef UNICODE
@@ -42,9 +23,10 @@ using namespace Gdiplus;
 
 #include "mainwnd.h"
 #include "smart.h"
-#include "donate.h"
 #include "utf8ui.h"
 #include "safestr.h"
+
+#define DONATE_URL "https://boosty.to/chuikoff"
 
 static unsigned __int64 NVMeRead128Lo(const BYTE* p)
 {
@@ -1181,7 +1163,7 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
         SetDlgItemTextU8(hWnd, IDC_TEMP_STATIC,        "-");
         SetDlgItemTextU8(hWnd, IDC_POH_STATIC,         "-");
         SetDlgItemTextU8(hWnd, IDC_STATUS_STATIC,      "Нет данных");
-        SetDlgItemTextU8(hWnd, IDC_READ_SPEED_STATIC,  "-");  /* protocol */
+        SetDlgItemTextU8(hWnd, IDC_PROTOCOL_STATIC,  "-");  /* protocol */
         SetDlgItemTextU8(hWnd, IDC_ADAPTER_STATIC,     "—");
 
         SetDlgItemTextU8(hWnd, IDC_PREDICT_STATIC,     "");
@@ -1253,7 +1235,7 @@ void UpdateDriveInfo(HWND hWnd, int nDriveIdx)
     }
     SetDlgItemTextU8(hWnd, IDC_STATUS_STATIC, szBuf);
 
-    SetDlgItemTextU8(hWnd, IDC_READ_SPEED_STATIC,
+    SetDlgItemTextU8(hWnd, IDC_PROTOCOL_STATIC,
                     pInfo->szProtocol[0] ? pInfo->szProtocol : "-");
 
     if (pInfo->bIsUSB) {
@@ -2306,38 +2288,21 @@ static volatile LONG g_bScanBusy = 0;
 static DRIVE_INFO g_ScanBuf[MAX_DRIVES];
 static int        g_nScanBufCount;
 
-static volatile BOOL g_bFullScanRequested = TRUE;
-
 static void ScanDrivesToBuf(void)
 {
-    int n = ScanDrivesEx(g_ScanBuf, MAX_DRIVES, FALSE);
+    int n = ScanDrives(g_ScanBuf, MAX_DRIVES);
     g_nScanBufCount = n;
-}
-
-/* Periodic: refresh SMART/NVMe health on already-known drives only.
- * No PhysicalDrive0..31 re-enumeration, no IDENTIFY, no SMART logs. */
-static void PeriodicRefreshToBuf(void)
-{
-    int i;
-    for (i = 0; i < g_nScanBufCount; i++) {
-        if (IsLikelyUsbFlashDrive(&g_ScanBuf[i])) continue;
-        if (!g_ScanBuf[i].bSMART_Supported) continue;
-        RefreshDriveSmart(g_ScanBuf[i].nDriveIndex, &g_ScanBuf[i]);
-    }
 }
 
 static DWORD WINAPI RefreshThreadProc(LPVOID lpParam)
 {
     HWND hWnd = (HWND)lpParam;
-    if (g_bFullScanRequested)
-        ScanDrivesToBuf();
-    else
-        PeriodicRefreshToBuf();
+    ScanDrivesToBuf();
     PostMessage(hWnd, WM_APP_REFRESH_DONE, 0, 0);
     return 0;
 }
 
-void RefreshData(HWND hWnd, BOOL bFull)
+void RefreshData(HWND hWnd)
 {
     HWND hReread = GetDlgItem(hWnd, IDC_REREAD_BTN);
     HWND hReport = GetDlgItem(hWnd, IDC_REPORT_BTN);
@@ -2345,14 +2310,6 @@ void RefreshData(HWND hWnd, BOOL bFull)
         return;
     if (hReread) EnableWindow(hReread, FALSE);
     if (hReport) EnableWindow(hReport, FALSE);
-
-    g_bFullScanRequested = bFull;
-    /* Periodic worker mutates a copy of the last good list in place.
-     * Full scan ZeroMemory's g_ScanBuf itself via ScanDrivesEx. */
-    if (!bFull) {
-        memcpy(g_ScanBuf, g_Drives, sizeof(DRIVE_INFO) * MAX_DRIVES);
-        g_nScanBufCount = g_nDriveCount;
-    }
 
     HANDLE hThread = CreateThread(NULL, 0, RefreshThreadProc, hWnd, 0, NULL);
     if (hThread)
@@ -2877,7 +2834,7 @@ void CreateControls(HWND hWnd)
             { IDC_TEMP_LABEL,       IDC_TEMP_STATIC,       "Температура", "-" },
             { IDC_POH_LABEL,        IDC_POH_STATIC,        "Наработка",   "-" },
             { IDC_STATUS_LABEL,     IDC_STATUS_STATIC,     "S.M.A.R.T.",  "-" },
-            { IDC_READ_SPEED_LABEL, IDC_READ_SPEED_STATIC, "Протокол",    "-" },
+            { IDC_PROTOCOL_LABEL, IDC_PROTOCOL_STATIC, "Протокол",    "-" },
             { IDC_ADAPTER_LABEL,    IDC_ADAPTER_STATIC,    "Переходник",  "—" },
         };
         int r;
@@ -2959,20 +2916,20 @@ static LRESULT HandleCtlColor(HWND hWnd, WPARAM wParam)
             id == IDC_FIRMWARE_LABEL || id == IDC_SIZE_LABEL      ||
             id == IDC_TEMP_LABEL     || id == IDC_POH_LABEL       ||
             id == IDC_STATUS_LABEL    ||
-            id == IDC_READ_SPEED_LABEL || id == IDC_ADAPTER_LABEL ||
+            id == IDC_PROTOCOL_LABEL || id == IDC_ADAPTER_LABEL ||
             id == IDC_BRAND_LABEL    || id == IDC_CONTROLLER_LABEL ||
             id == IDC_NAND_LABEL     ||
             id == IDC_MODEL_STATIC   || id == IDC_SERIAL_STATIC   ||
             id == IDC_FIRMWARE_STATIC|| id == IDC_SIZE_STATIC     ||
             id == IDC_POH_STATIC     || id == IDC_STATUS_STATIC    ||
-            id == IDC_READ_SPEED_STATIC || id == IDC_ADAPTER_STATIC ||
+            id == IDC_PROTOCOL_STATIC || id == IDC_ADAPTER_STATIC ||
             id == IDC_BRAND_STATIC   || id == IDC_CONTROLLER_STATIC ||
             id == IDC_NAND_STATIC || id == IDC_AXIS_STATIC) {
             BOOL bLabel = (id == IDC_MODEL_LABEL || id == IDC_SERIAL_LABEL ||
                            id == IDC_FIRMWARE_LABEL || id == IDC_SIZE_LABEL ||
                            id == IDC_TEMP_LABEL || id == IDC_POH_LABEL ||
                            id == IDC_STATUS_LABEL ||
-                           id == IDC_READ_SPEED_LABEL || id == IDC_ADAPTER_LABEL ||
+                           id == IDC_PROTOCOL_LABEL || id == IDC_ADAPTER_LABEL ||
                            id == IDC_BRAND_LABEL || id == IDC_CONTROLLER_LABEL ||
                            id == IDC_NAND_LABEL);
             SetTextColor(hdc, bLabel ? CLR_TEXT_DIM : CLR_TEXT);
@@ -3021,7 +2978,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         /* SMART is read once at create and on hotplug — no periodic refresh. */
 
         UpdateWindowTitle(hWnd);
-        RefreshData(hWnd, TRUE);
+        RefreshData(hWnd);
         {
             GdiplusStartupInput gdipInput;
             GdiplusStartup(&g_gdiplusToken, &gdipInput, NULL);
@@ -3231,7 +3188,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
                 }
             }
             else if (nCtrl == IDC_REREAD_BTN) {
-                RefreshData(hWnd, TRUE);  /* full one-shot scan, incl. RTL9210 0xE4 */
+                RefreshData(hWnd);  /* full one-shot scan, incl. RTL9210 0xE4 */
             }
             else if (nCtrl == IDC_REPORT_BTN || nCtrl == IDM_REPORT) {
                 DoSaveDriveReport(hWnd);
@@ -3290,7 +3247,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     case WM_TIMER:
         if (wParam == IDT_HOTPLUG) {
             KillTimer(hWnd, IDT_HOTPLUG);
-            RefreshData(hWnd, TRUE);    /* one-shot full scan on plug/unplug */
+            RefreshData(hWnd);    /* one-shot full scan on plug/unplug */
         }
         return 0;
 
@@ -3347,7 +3304,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             { int lblIds[] = { IDC_MODEL_LABEL, IDC_BRAND_LABEL, IDC_CONTROLLER_LABEL,
                                IDC_NAND_LABEL, IDC_SERIAL_LABEL, IDC_FIRMWARE_LABEL,
                                IDC_SIZE_LABEL, IDC_TEMP_LABEL, IDC_POH_LABEL, IDC_STATUS_LABEL,
-                               IDC_READ_SPEED_LABEL, IDC_ADAPTER_LABEL };
+                               IDC_PROTOCOL_LABEL, IDC_ADAPTER_LABEL };
               int k2;
               for (k2 = 0; k2 < 12; k2++) {
                   HWND hL = GetDlgItem(hWnd, lblIds[k2]);
@@ -3359,7 +3316,7 @@ LRESULT CALLBACK MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
             { int valIds[] = { IDC_MODEL_STATIC, IDC_BRAND_STATIC, IDC_CONTROLLER_STATIC,
                                IDC_NAND_STATIC, IDC_SERIAL_STATIC, IDC_FIRMWARE_STATIC,
                                IDC_SIZE_STATIC, IDC_TEMP_STATIC, IDC_POH_STATIC, IDC_STATUS_STATIC,
-                               IDC_READ_SPEED_STATIC, IDC_ADAPTER_STATIC };
+                               IDC_PROTOCOL_STATIC, IDC_ADAPTER_STATIC };
               int k3;
               for (k3 = 0; k3 < 12; k3++) {
                   HWND hV = GetDlgItem(hWnd, valIds[k3]);

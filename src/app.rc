@@ -1,27 +1,9 @@
-/* ============================================================================
- *  DriveMonitor - Win32 resource script
- *  ---------------------------------------------------------------------------
- *  100% Free and Open Source Software (FOSS).
- *
- *  Author  : Ari Sohandri Putra
- *  Company : ARImetic Inc.
- *  Sponsor : https://github.com/sponsors/arisohandriputra/
- *  License : MIT
- *
- *  This script defines:
- *    - The application icons (IDI_APPICON, IDI_HDD)
- *    - The side-by-side application manifest (Common-Controls v6 + admin)
- *    - The standard VS_VERSION_INFO block embedded into the .exe
- * ============================================================================
- */
+/* DriveMonitor - icon, manifest, VERSIONINFO. MIT: see LICENSE. */
 
 #include <windows.h>
 #include "resource.h"
 
-/* Application icons.  The same .ico file is reused for both the main
-   application icon and the drive icon used in the tray / drive buttons. */
 IDI_APPICON  ICON  "app.ico"
-IDI_HDD      ICON  "app.ico"
 
 /* Embed the application manifest (Common-Controls v6 + requireAdministrator). */
 1 24 "app.manifest"

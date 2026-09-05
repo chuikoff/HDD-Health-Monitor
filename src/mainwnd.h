@@ -1,30 +1,15 @@
-/* ============================================================================
- *  HDDHealth Monitor - Main window declarations
- *  ---------------------------------------------------------------------------
- *  100% Free and Open Source Software (FOSS).
- *
- *  Author  : Ari Sohandri Putra
- *  Company : ARImetic Inc.
- *  Sponsor : https://github.com/sponsors/arisohandriputra/
- *  License : MIT
- *
- *  This header collects every shared declaration used by mainwnd.cpp:
- *    - Control / menu / timer IDs (IDC_*, IDM_*, IDT_*)
- *    - Color palette constants (CLR_*)
- *    - Layout constants (WINDOW_W, DRIVE_BTN_H, ...)
- *    - Global state (g_Drives, g_hMainWnd, GDI brushes / fonts, ...)
- *    - Public function prototypes (MainWndProc, ShowAboutDialog, ...)
- * ============================================================================
- */
-
+/* DriveMonitor - main window. Fork of HDDHealth Monitor, MIT: see LICENSE. */
 #pragma once
 #ifndef MAINWND_H
 #define MAINWND_H
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "smart.h"
-#define MAX_DRIVES 8
 #include "resource.h"
+
+#define DRIVEMONITOR_WNDCLASS L"DriveMonitorMainWnd"
+#define MAX_DRIVES 8
+
 #define IDC_DRIVE_LIST       1001
 #define IDC_HEALTH_STATIC    1002
 #define IDC_HEALTH_BAR_FRAME 1003
@@ -38,15 +23,14 @@
 #define IDC_HEALTH_LABEL     1011
 #define IDC_PREDICT_STATIC   1012
 #define IDC_TEMP_STATIC        1015
-#define IDC_READ_SPEED_STATIC  1016
-
+#define IDC_PROTOCOL_STATIC    1016
 #define IDC_MODEL_LABEL        1018
 #define IDC_SERIAL_LABEL       1019
 #define IDC_FIRMWARE_LABEL     1020
 #define IDC_SIZE_LABEL         1021
 #define IDC_TEMP_LABEL         1022
 #define IDC_STATUS_LABEL       1023
-#define IDC_READ_SPEED_LABEL   1024
+#define IDC_PROTOCOL_LABEL     1024
 #define IDC_REREAD_BTN         1026
 #define IDC_REPORT_BTN         1035
 #define IDC_DRIVE_BTN_BASE   1100
@@ -76,7 +60,6 @@
 #define CLR_HEADER      RGB(220, 230, 244)
 #define CLR_ROW1        RGB(252, 254, 255)
 #define CLR_ROW2        RGB(240, 246, 252)
-#define MAX_DRIVES 8
 
 extern DRIVE_INFO  g_Drives[MAX_DRIVES];
 extern int         g_nDriveCount;
@@ -103,7 +86,7 @@ void    RepaintHealthBar(void);
 void    CreateControls(HWND hWnd);
 void    CreateGDIObjects(void);
 void    DestroyGDIObjects(void);
-void    RefreshData(HWND hWnd, BOOL bFull);
+void    RefreshData(HWND hWnd);
 void    UpdateDriveButtons(HWND hWnd);
 void    UpdateDriveInfo(HWND hWnd, int nDrive);
 void    UpdateAttrList(HWND hWnd, int nDrive);

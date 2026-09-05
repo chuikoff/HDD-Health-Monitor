@@ -1,15 +1,7 @@
 # ============================================================================
-#  DriveMonitor - Build configuration
-#  ---------------------------------------------------------------------------
-#  100% Free and Open Source Software (FOSS).
-#
-#  Author  : Ari Sohandri Putra
-#  Company : ARImetic Inc.
-#  Sponsor : https://github.com/sponsors/arisohandriputra/
-#  License : MIT
-#
-#  Build targets:
-#    - $(OUTDIR)/DriveMonitor.exe : The monitor application itself.
+#  DriveMonitor - MinGW build
+#  Fork of HDDHealth Monitor (Ari Sohandri Putra / ARImetic Inc., MIT)
+#  Fork changes: chuikoff
 # ============================================================================
 
 ifeq ($(OS),Windows_NT)

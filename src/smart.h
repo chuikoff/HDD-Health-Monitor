@@ -1,22 +1,4 @@
-/* ============================================================================
- *  HDDHealth Monitor - S.M.A.R.T. public interface
- *  ---------------------------------------------------------------------------
- *  100% Free and Open Source Software (FOSS).
- *
- *  Author  : Ari Sohandri Putra
- *  Company : ARImetic Inc.
- *  Sponsor : https://github.com/sponsors/arisohandriputra/
- *  License : MIT
- *
- *  This header exposes the public surface of smart.cpp:
- *    - DRIVE_INFO structure (one per detected physical drive)
- *    - SMART_ATTRIBUTE structure (one per attribute, up to 30 per drive)
- *    - ScanDrives() enumeration entry point
- *
- *  IOCTL / ATA / NVMe constants that some MinGW headers omit are also
- *  defined here for convenience.
- * ============================================================================
- */
+/* DriveMonitor - SMART public API. Fork of HDDHealth Monitor, MIT: see LICENSE. */
 
 #pragma once
 #ifndef SMART_H
@@ -425,16 +407,13 @@ typedef struct _DRIVE_INFO {
     DWORD       dwCapacityMB;
     BOOL        bSMART_Supported;
     BOOL        bSMART_Enabled;
-    int         nHealthPercent;
-    int         nPerformancePercent;
+    int         nHealthPercent;  /* remaining life 0-100, or -1; not a fake Health% */
     BOOL        bPredictFailure;
     int         nDriveIndex;
     BOOL        bIsUSB;
     DRIVE_TYPE  eType;
     int         nTemperatureC;
     BOOL        bIsNVMe;
-    int         nReadSpeedMBs;
-    int         nWriteSpeedMBs;
     char        szProtocol[32];  /* e.g. "NVMe 1.2.1", "SATA 6 Гбит/с", "USB" */
     SMART_ACCESS_METHOD eAccessMethod;
     DWORD       dwPowerOnHours;
@@ -565,8 +544,6 @@ typedef struct _ATTR_NAME {
     ATTR_INTERP     eInterp;
 } ATTR_NAME;
 
-extern const ATTR_NAME g_AttrNames[];
-
 /* Trusted RAW decoder vs. vendor-specific packing we refuse to score. */
 typedef enum _ATTR_DECODE_STATE {
     ATTR_DECODE_KNOWN   = 0,   /* encoding trusted */
@@ -599,13 +576,8 @@ void GetAttrDecode(BYTE bID, const DRIVE_INFO* pInfo, ATTR_DECODE* out);
 /* ============================================================
  * Public API
  * ============================================================ */
-const char* GetAttrName(BYTE bID);
 const char* GetAttrNameEx(BYTE bID, const DRIVE_INFO* pInfo);
-ATTR_CRITICALITY GetAttrCriticality(BYTE bID);
-ATTR_INTERP GetAttrInterpretation(BYTE bID);
-BOOL        IsAttrCritical(BYTE bID);
 const char* GetDriveTypeName(DRIVE_TYPE eType);
-const char* GetAccessMethodName(SMART_ACCESS_METHOD eMethod);
 const char* GetHealthStatusName(DRIVE_HEALTH_STATUS eStatus);
 const char* GetVendorName(DRIVE_VENDOR eVendor);
 const char* GetControllerName(DRIVE_CONTROLLER eController);
@@ -672,23 +644,11 @@ const char* GetTempBandName(TEMP_BAND eBand, BOOL bLowercase);
 void  FormatPowerOnHours(DWORD dwHours, char* szBuf, int nBufLen);
 BOOL  DriveTreatsC0AsPowerLoss(const DRIVE_INFO* pInfo);
 BOOL  IsShockSensorAttr(BYTE bID);
-int   CalculateHealth(DRIVE_INFO* pInfo);
-int   CalculateHealthNVMe(DRIVE_INFO* pInfo);
-DRIVE_HEALTH_STATUS DetermineHealthStatus(DRIVE_INFO* pInfo);
-int   CalculatePerformance(DRIVE_INFO* pInfo);
 
 /* SSD-specific analysis */
 void  ExtractSSDIndicators(DRIVE_INFO* pInfo);
 
-/* Aggregate scan.
- * ScanDrivesEx: bMeasureSpeed is ignored (always treated as FALSE).
- * Speed probes were removed — 4MB PhysicalDrive I/O crashed USB flash.
- * ScanDrives() never measures speed. */
 int   ScanDrives(DRIVE_INFO* pDrives, int nMaxDrives);
-int   ScanDrivesEx(DRIVE_INFO* pDrives, int nMaxDrives, BOOL bMeasureSpeed);
-/* Refresh attributes / NVMe health only. Does NOT re-read SMART error log
- * or self-test log — those stay on the full ScanDrives path. */
-BOOL  RefreshDriveSmart(int nDriveIndex, DRIVE_INFO* pInfo);
 
 /* USB flash (UFD) heuristic: USB bus + flash-like product name, and not a
  * known NVMe/SATA enclosure bridge. Used to skip SAT/vendor SMART retries. */

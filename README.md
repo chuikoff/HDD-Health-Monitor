@@ -1,71 +1,51 @@
 # DriveMonitor
 
-**Fork of [arisohandriputra/HDD-Health-Monitor](https://github.com/arisohandriputra/HDD-Health-Monitor)** — MIT License.
+Русский просмотрщик S.M.A.R.T. для Windows. Форк [HDDHealth Monitor](https://github.com/arisohandriputra/HDD-Health-Monitor) (MIT).
 
-DriveMonitor is a renamed fork of HDDHealth Monitor. MIT does not require a rename; this one uses the DriveMonitor product name. Original copyright: Ari Sohandri Putra / ARImetic Inc.
+English: a one-shot Windows SMART viewer. No tray, no live polling, no Health% formula. Russian UI.
 
-**100% Free and Open Source Software (FOSS)**
+**Текущий выпуск:** [1.5.1-beta](https://github.com/chuikoff/DriveMonitor/releases/tag/1.5.1-beta) — скачать `DriveMonitor.exe`, запустить от администратора.
 
----
+Windows 10 / 11. Не CrystalDiskInfo и не Victoria: один снимок SMART (старт, hotplug, «Перечитать»), без трея, графика и теста поверхности.
 
-**Support:** Windows 11/10/8.1/8/7/Vista
+## Что внутри
 
-## What this fork changes
+Читает сырые SMART-данные через `DeviceIoControl` и показывает таблицу Victoria: ID / Параметр / Значение / Худший / Порог / RAW / Статус.
 
-- Skips `IOCTL_STORAGE_PROTOCOL_COMMAND` on the default NVMe path (avoids `nvme.sys` BSOD `DRIVER_IRQL_NOT_LESS_OR_EQUAL`)
-- Russian UI (UTF-16), Victoria-style SMART table (ID / Параметр / Значение / Худший / Порог / RAW / Статус)
-- USB Realtek/JMicron/ASMedia: SAT first (SATA SSD), then one vendor passthrough (NVMe). No native NVMe IOCTL on USB
-- USB adapter name from VID/PID (e.g. Realtek 0BDA:9201), not the disk model
-- Unified SMART headline for every drive: **Запас · Износ · Записано** (missing values are —)
-- SMART is read once at start, on hotplug, and via **Перечитать**. No live monitoring, tray, graph, or surface test
-- Close on X quits the app. Window is resizable. Protocol shown (e.g. NVMe 1.2.1, SATA 6 Гбит/с)
-- Health is GOOD / CAUTION / BAD / UNKNOWN from an evidence matrix (not a Health% formula). Unknown vendor RAW is unscored, not Bad
-- Split confidence (completeness, transport, model, decoder, assess). Temperature bands; power-on hours are context, not a penalty
-- Vendor-aware SMART names/RAW (Seagate, WD, Samsung, Kingston/Phison, ADATA, Toshiba, Micron, Hynix, Intel)
-- No tray, no unused refresh timers, no glass chrome, no `IOCTL_STORAGE_PROTOCOL_COMMAND` in the tree
-- Needs administrator rights
+| Шина | Как читается |
+|------|----------------|
+| SATA | `IOCTL_ATA_PASS_THROUGH_DIRECT` |
+| USB-бокс (Realtek, JMicron, ASMedia) | SAT сначала (SATA за мостом), затем один vendor-passthrough (NVMe). Нативного NVMe IOCTL на USB нет |
+| Внутренний NVMe | SCSI miniport / `IOCTL_STORAGE_QUERY_PROPERTY`. **Не** `IOCTL_STORAGE_PROTOCOL_COMMAND` — на `nvme.sys` это давало BSOD |
 
-## Author
+Имя USB-переходника берётся из VID/PID (например Realtek `0BDA:9201`), не из модели диска.
 
-Fork: **chuikoff** — https://boosty.to/chuikoff
+Здоровье — пятиуровневая шкала **ХОРОШО → РИСК → ТРЕБУЕТ ВНИМАНИЯ → ПЛОХО → КРИТИЧЕСКОЕ**. Overall = худший канал:
 
-Upstream: **Ari Sohandri Putra** (ARImetic Inc.). MIT copyright stays in [LICENSE](./LICENSE).
+- HDD: носитель / механика / интерфейс / температура
+- SSD / NVMe: носитель / ресурс / интерфейс / температура
 
-## License
+Не формула Health%. Неизвестный vendor RAW не оценивается как поломка. Наработка — контекст, не штраф. ~48 °C — норма.
 
-This project is released under the [MIT License](./LICENSE).
+Имена и RAW атрибутов зависят от производителя (Seagate, WD, Samsung, Kingston/Phison, ADATA, Toshiba, Micron, Hynix, Intel).
 
-## What it does
+## Сборка
 
-DriveMonitor is a low-level Windows utility that reads raw
-S.M.A.R.T. data directly from physical drives via `DeviceIoControl` and
-presents it through a GUI. It supports:
-
-- **ATA / SATA** drives via `IOCTL_ATA_PASS_THROUGH_DIRECT`
-- **USB** bridges (Realtek RTL9210 SAT + 0xE4, JMicron, ASMedia, …) via `IOCTL_SCSI_PASS_THROUGH_DIRECT` / SAT
-- **Internal NVMe** via SCSI miniport / storage query — **not** `IOCTL_STORAGE_PROTOCOL_COMMAND`
-
-## Building
-
-### Prerequisites
-
-- **MinGW-w64** or **TDM-GCC** (any recent GCC with C++ support).
-
-### Build
+Нужен **MinGW-w64** или **TDM-GCC**.
 
 ```bash
-# Native Windows build (in a MinGW / MSYS2 shell)
-make
-```
-```bash
-# Cross-compile from Linux
 make
 ```
 
-The output binary is `bin/DriveMonitor.exe`.
-
-### Clean
+Результат: `bin/DriveMonitor.exe` (статический x64, без DLL рантайма).
 
 ```bash
 make clean
 ```
+
+## Лицензия
+
+MIT. Оригинальный copyright: Ari Sohandri Putra / ARImetic Inc. Изменения форка: [chuikoff](https://github.com/chuikoff).
+
+Поддержать форк: https://boosty.to/chuikoff  
+Апстрим: https://github.com/sponsors/arisohandriputra/
